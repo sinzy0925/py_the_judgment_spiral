@@ -1,3 +1,4 @@
+# api_key_manager.py
 import os
 import json
 import asyncio
@@ -14,12 +15,25 @@ class ApiKeyManager:
     複数のAPIキーを管理し、安全なローテーション、セッションの永続化、
     および高負荷な並列処理下でのレースコンディションを回避するシステム。
     """
+    _instance = None
+
+    # シングルトンパターンを適用し、アプリケーション全体で唯一のインスタンスを保証
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(ApiKeyManager, cls).__new__(cls)
+        return cls._instance
+
     def __init__(self):
+        # __init__が複数回呼ばれることを防ぐためのフラグ
+        if hasattr(self, '_initialized'):
+            return
+        self._initialized = True
+
         self._api_keys: list[str] = []
         self._current_index: int = -1
         self._last_access_time: float = 0.0
         # APIコール間のクールダウン時間（秒）。レート制限に対する安全マージン。
-        self._COOLDOWN_SECONDS = 5 # 0.1秒
+        self._COOLDOWN_SECONDS = 1.0  # 1秒のクールダウン
 
         # キー選択処理をアトミック（不可分）にするためのロック
         self._key_selection_lock = asyncio.Lock()
@@ -27,15 +41,16 @@ class ApiKeyManager:
         self._load_api_keys_from_env()
         self._load_session()
         
-        # シングルトンとして振る舞うためのクラス変数
-        ApiKeyManager._instance = self
+        print(f"[{self.__class__.__name__}] 初期化完了。{len(self._api_keys)}個のキーをロードしました。")
 
     def _load_api_keys_from_env(self):
         """ .envファイルから全てのAPIキーを読み込む """
         keys = set() # 重複を自動的に排除するためにセットを使用
+        
         # GOOGLE_API_KEY も読み込む
-        if os.getenv('GOOGLE_API_KEY'):
-            keys.add(os.getenv('GOOGLE_API_KEY'))
+        base_key = os.getenv('GOOGLE_API_KEY')
+        if base_key:
+            keys.add(base_key)
         
         # GOOGLE_API_KEY_1, _2, ... を読み込む
         i = 1
@@ -49,9 +64,7 @@ class ApiKeyManager:
         
         self._api_keys = list(keys)
         if not self._api_keys:
-            print("警告: APIキーが.envファイルに設定されていません。")
-        else:
-            print(f"[{self.__class__.__name__}] {len(self._api_keys)}個のユニークなAPIキーをロードしました。")
+            print("警告: 有効なAPIキーが.envファイルに設定されていません。")
 
     def _load_session(self):
         """ セッションファイルから、最後に使ったキーのインデックスを読み込む """
@@ -60,14 +73,23 @@ class ApiKeyManager:
                 with open(SESSION_FILE, 'r') as f:
                     data = json.load(f)
                     last_index = data.get('lastKeyIndex', -1)
+                    # 読み込んだインデックスが現在のキーリストの範囲内か確認
                     if 0 <= last_index < len(self._api_keys):
                         self._current_index = last_index
+                        print(f"[{self.__class__.__name__}] セッションをロードしました。次のキーインデックスは { (last_index + 1) % len(self._api_keys) } から開始します。")
+                    else:
+                        self._current_index = -1
+
         except (IOError, json.JSONDecodeError) as e:
-            print(f"セッションファイルの読み込みに失敗しました: {e}")
+            print(f"セッションファイルの読み込み中にエラーが発生しました: {e}")
             self._current_index = -1
 
     def save_session(self):
         """ 最後に使ったキーのインデックスをセッションファイルに保存する """
+        # 保存すべきキーがない場合は何もしない
+        if not self._api_keys:
+            return
+            
         try:
             with open(SESSION_FILE, 'w') as f:
                 json.dump({'lastKeyIndex': self._current_index}, f)
@@ -79,21 +101,24 @@ class ApiKeyManager:
         次の利用可能なAPIキーを、安全な排他制御とクールダウン付きで取得する。
         """
         if not self._api_keys:
+            print("エラー: 利用可能なAPIキーがありません。")
             return None
 
         # asyncio.Lockを使い、キーの選択とインデックス更新処理が同時に実行されないようにする
         async with self._key_selection_lock:
-            now = asyncio.get_event_loop().time()
-            elapsed_time = now - self._last_access_time
-
             # 前回の呼び出しからクールダウン時間内に再度呼び出された場合、待機する
-            if self._last_access_time > 0 and elapsed_time < self._COOLDOWN_SECONDS:
-                wait_time = self._COOLDOWN_SECONDS - elapsed_time
-                await asyncio.sleep(wait_time)
+            # ループの初回実行時などを考慮し、self._last_access_timeが0より大きい場合のみチェック
+            if self._last_access_time > 0:
+                now = asyncio.get_event_loop().time()
+                elapsed_time = now - self._last_access_time
+                if elapsed_time < self._COOLDOWN_SECONDS:
+                    wait_time = self._COOLDOWN_SECONDS - elapsed_time
+                    await asyncio.sleep(wait_time)
             
             # ラウンドロビン方式で次のインデックスを計算
             self._current_index = (self._current_index + 1) % len(self._api_keys)
-            self._last_access_time = asyncio.get_event_loop().time() # キーを払い出した時刻を更新
+            # キーを払い出した時刻を更新
+            self._last_access_time = asyncio.get_event_loop().time()
             
             return self._api_keys[self._current_index]
 
@@ -112,7 +137,7 @@ class ApiKeyManager:
         
         key = self._api_keys[self._current_index]
         return {
-            "key_snippet": key[-5:], # 最後の5文字
+            "key_snippet": key[-4:], # 最後の4文字
             "index": self._current_index,
             "total": len(self._api_keys)
         }
