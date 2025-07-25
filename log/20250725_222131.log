@@ -1,0 +1,24 @@
+ログを '20250725_222131.log' に保存します。
+
+--- [ステップ1/6] 初回実行中... ---
+エラー: スクリプトの実行に失敗しました。
+STDOUT:
+'Ђv  {s敟PڂPԂSW|QTOR' ɂāAAIvlJn܂...
+STDERR:
+Traceback (most recent call last):
+  File "C:\Users\sinzy\test\py_the_judgment_spiral\gemini_search_app_new_sdk.py", line 139, in <module>
+    main()
+  File "C:\Users\sinzy\test\py_the_judgment_spiral\gemini_search_app_new_sdk.py", line 94, in main
+    response = client.models.generate_content(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: Models.generate_content() got an unexpected keyword argument 'tools'
+
+エラー: プロセス全体で予期せぬエラー: gemini_search_app_new_sdk.pyの実行に失敗しました。
+Traceback (most recent call last):
+  File "C:\Users\sinzy\test\py_the_judgment_spiral\advanced_evaluation_runner_log.py", line 205, in main
+    initial_log, _ = await run_search_app(query, key1)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\sinzy\test\py_the_judgment_spiral\advanced_evaluation_runner_log.py", line 52, in run_search_app
+    raise RuntimeError("gemini_search_app_new_sdk.pyの実行に失敗しました。")
+RuntimeError: gemini_search_app_new_sdk.pyの実行に失敗しました。
+

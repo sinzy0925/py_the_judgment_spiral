@@ -1,0 +1,13 @@
+ログを 'log\20250725_215706.log' に保存します。
+--- [ステップ1/6] 初回実行中... ---
+
+エラー: 予期せぬエラーが発生しました。
+Traceback (most recent call last):
+  File "C:\Users\sinzy\test\py_the_judgment_spiral\advanced_evaluation_runner_log.py", line 181, in main
+    initial_log = await run_search_app(company_name)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\sinzy\test\py_the_judgment_spiral\advanced_evaluation_runner_log.py", line 113, in run_search_app
+    raise ValueError("利用可能なAPIキーがありません。")
+ValueError: 利用可能なAPIキーがありません。
+
+APIキーセッションを保存しました。

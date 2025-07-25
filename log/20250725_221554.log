@@ -1,0 +1,24 @@
+ログを '20250725_221554.log' に保存します。
+
+--- [ステップ1/6] 初回実行中... ---
+エラー: スクリプトの実行に失敗しました。
+STDOUT:
+
+STDERR:
+Traceback (most recent call last):
+  File "C:\Users\sinzy\test\py_the_judgment_spiral\gemini_search_app_new_sdk.py", line 147, in <module>
+    main()
+  File "C:\Users\sinzy\test\py_the_judgment_spiral\gemini_search_app_new_sdk.py", line 80, in main
+    genai.configure(api_key=args.api_key)
+    ^^^^^^^^^^^^^^^
+AttributeError: module 'google.genai' has no attribute 'configure'
+
+エラー: プロセス全体で予期せぬエラー: gemini_search_app_new_sdk.pyの実行に失敗しました。
+Traceback (most recent call last):
+  File "C:\Users\sinzy\test\py_the_judgment_spiral\advanced_evaluation_runner_log.py", line 203, in main
+    initial_log, _ = await run_search_app(query, key1)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\sinzy\test\py_the_judgment_spiral\advanced_evaluation_runner_log.py", line 52, in run_search_app
+    raise RuntimeError("gemini_search_app_new_sdk.pyの実行に失敗しました。")
+RuntimeError: gemini_search_app_new_sdk.pyの実行に失敗しました。
+

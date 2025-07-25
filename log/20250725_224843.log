@@ -1,0 +1,11 @@
+ログを '20250725_224843.log' に保存します。
+
+--- [ステップ1/6] 初回実行中... ---
+
+エラー: プロセス全体で予期せぬエラー: run_search_app() missing 1 required positional argument: 'api_key'
+Traceback (most recent call last):
+  File "C:\Users\sinzy\test\py_the_judgment_spiral\advanced_evaluation_runner_log.py", line 204, in main
+    initial_log, _ = await run_search_app(query)
+                           ^^^^^^^^^^^^^^^^^^^^^
+TypeError: run_search_app() missing 1 required positional argument: 'api_key'
+

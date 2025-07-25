@@ -1,0 +1,30 @@
+ログを '20250725_222609.log' に保存します。
+
+--- [ステップ1/6] 初回実行中... ---
+エラー: スクリプトの実行に失敗しました。
+STDOUT:
+'Ђv  {s敟PڂPԂSW|QTOR' ɂāAAIvlJn܂...
+STDERR:
+Traceback (most recent call last):
+  File "C:\Users\sinzy\test\py_the_judgment_spiral\gemini_search_app_new_sdk.py", line 152, in <module>
+    main()
+  File "C:\Users\sinzy\test\py_the_judgment_spiral\gemini_search_app_new_sdk.py", line 96, in main
+    types.Tool(function_declarations=[fetch_url_content]),
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\sinzy\AppData\Local\Programs\Python\Python312\Lib\site-packages\pydantic\main.py", line 253, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 1 validation error for Tool
+function_declarations.0
+  Input should be a valid dictionary or object to extract fields from [type=model_attributes_type, input_value=<function fetch_url_content at 0x000001F42A565BC0>, input_type=function]
+    For further information visit https://errors.pydantic.dev/2.11/v/model_attributes_type
+
+エラー: プロセス全体で予期せぬエラー: gemini_search_app_new_sdk.pyの実行に失敗しました。
+Traceback (most recent call last):
+  File "C:\Users\sinzy\test\py_the_judgment_spiral\advanced_evaluation_runner_log.py", line 204, in main
+    initial_log, _ = await run_search_app(query, key1)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\sinzy\test\py_the_judgment_spiral\advanced_evaluation_runner_log.py", line 52, in run_search_app
+    raise RuntimeError("gemini_search_app_new_sdk.pyの実行に失敗しました。")
+RuntimeError: gemini_search_app_new_sdk.pyの実行に失敗しました。
+
