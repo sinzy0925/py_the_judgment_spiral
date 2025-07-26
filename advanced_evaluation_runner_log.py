@@ -1,3 +1,5 @@
+# advanced_evaluation_runner_log.py (JSON抽出ロジックを強化)
+
 import sys
 import json
 import re
@@ -7,7 +9,7 @@ from dotenv import load_dotenv
 import asyncio
 import subprocess
 
-# google.genaiのインポートは非同期化後も必要
+# google.genaiのインポート
 try:
     from google import genai
 except ImportError:
@@ -15,22 +17,29 @@ except ImportError:
     print("pip install google-genai を実行してください。")
     sys.exit(1)
 
+# ApiKeyManagerのシングルトンインスタンスをインポート
+from api_key_manager import api_key_manager
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
 
 # --- PROMPT DEFINITIONS ---
-
-def create_initial_evaluation_prompt(log_output: str) -> str:
+def create_initial_evaluation_prompt(log_output: str, company_name: str) -> str:
     """初回評価と、改善版プロンプトの生成をAIに依頼するプロンプト"""
     return f"""
-あなたは、AIのパフォーマンスを多角的に分析し、改善策を提案する専門のプロンプトエンジニアです。
+あなたは、AIのパフォーマンスを多角的に分析し、改善策を提案する、世界トップクラスのプロンプトエンジニアです。
 以下の実行ログを慎重に分析し、提供されたJSONスキーマに従って「評価レポート」と「改善版プロンプト」を作成してください。
 
-評価のポイント：
-1.  **品質評価**: 情報の正確性、推論の妥当性、指示への忠実性を評価します。
-2.  **性能評価**: 実行時間とトークン数から、コストパフォーマンスを評価します。
-3.  **プロンプト改善提案**: ログの内容に基づき、元のプロンプトをさらに改善するための**具体的な改善版プロンプトを生成してください。**改善の必要性が低い場合でも、より良くするための提案を盛り込んでください。
+### 評価のポイント
+1.  品質評価: 情報の正確性、推論の妥当性、指示への忠実性を評価します。
+2.  性能評価: 実行時間とトークン数から、コストパフォーマンスを評価します。
+3.  プロンプト改善提案: ログの内容に基づき、元のプロンプトをさらに改善するための**具体的な改善版プロンプトの全文を生成してください。**
+
+### 【最重要】改善版プロンプトの作成ルール
+生成するプロンプトは、それ自体が **単独で実行可能な命令セット** でなければなりません。
+
+- **調査対象の企業名として、必ず「{company_name}」という具体的な文字列をプロンプト内に直接埋め込んでください。** プレースホルダー (`{{{{company_name}}}}` など) は絶対に使用しないでください。
+- プロンプトの最後には、AIが実行すべき具体的な命令文（例：「上記の指示に基づき、指定された企業について調査し、JSONで出力してください。」）を必ず含めてください。
 
 --- 評価対象の実行ログ ---
 {log_output}
@@ -55,9 +64,8 @@ def create_initial_evaluation_prompt(log_output: str) -> str:
     "tokens": {{"input": "int", "output": "int", "total": "int"}},
     "analysis": "速度とコストの観点からのパフォーマンス分析"
   }},
-  "suggestedPrompt": "（ここに、あなたが生成した改善版の完全なプロンプト文字列を記述してください。company_nameプレースホルダーを含めてください。）"
-}}
-```
+  "suggestedPrompt": "（ここに、あなたが生成した改善版の完全なプロンプト文字列を記述してください。プレースホルダーは含めないでください。）"
+}}```
 """
 
 def create_comparison_prompt(eval1_json: str, eval2_json: str) -> str:
@@ -65,18 +73,14 @@ def create_comparison_prompt(eval1_json: str, eval2_json: str) -> str:
     return f"""
 あなたは、A/Bテストの結果を分析する専門のアナリストです。
 以下の2つのAI実行評価レポート（初回実行と、プロンプト改善後の実行）を比較し、プロンプトの改善が有効だったかどうかを最終判定してください。
-
 --- レポート1: 初回実行の評価 ---
 {eval1_json}
 --- ここまで ---
-
 --- レポート2: プロンプト改善後の実行評価 ---
 {eval2_json}
 --- ここまで ---
-
 --- 出力必須のJSONスキーマ ---
-```json
-{{
+json```{{
   "comparisonSummary": {{
     "initialScore": "レポート1の総合スコア",
     "improvedScore": "レポート2の総合スコア",
@@ -87,14 +91,13 @@ def create_comparison_prompt(eval1_json: str, eval2_json: str) -> str:
     "qualityChange": "回答の品質（正確性、推論など）がどのように変化したかの具体的な分析",
     "finalVerdict": "プロンプトの改善は有効だったか、その理由は何か、という最終結論"
   }}
-}}
-```
+}}```
 """
 
 # --- HELPER FUNCTIONS (Async) ---
 
 async def run_search_app(company_name: str, prompt_file: str = None) -> str:
-    """gemini_search_app_new_sdk.py を非同期で実行してログを返す"""
+    # (この関数は変更なし)
     target_script = "gemini_search_app_new_sdk.py"
     command = [sys.executable, target_script, company_name]
     if prompt_file:
@@ -120,29 +123,68 @@ async def run_search_app(company_name: str, prompt_file: str = None) -> str:
 
     return stdout.decode('utf-8', 'replace')
 
+# <<< 変更点: call_gemini関数のJSON抽出ロジックを強化
 async def call_gemini(prompt: str) -> dict:
-    """Geminiを非同期で呼び出し、レスポンスのJSONをパースして返す"""
-    def generate():
-        # 同期SDKはスレッド内で呼び出す
-        client = genai.Client()
+    """
+    ApiKeyManagerからキーを取得し、そのキーを使ってGeminiを非同期で呼び出し、
+    レスポンスからJSONを堅牢に抽出してパースして返す。
+    """
+    api_key = await api_key_manager.get_next_key()
+    if not api_key:
+        raise ValueError("APIキーを取得できませんでした。ApiKeyManagerの設定を確認してください。")
+
+    key_info = api_key_manager.last_used_key_info
+    print(f"  [Gemini Call] API Key (index: {key_info['index']}/{key_info['total']-1}, ends with: ...{key_info['key_snippet']}) を使用します。")
+    
+    def generate(key_to_use: str):
+        client = genai.Client(api_key=key_to_use)
         response = client.models.generate_content(
             model='gemini-2.5-pro',
             contents=prompt
         )
-        json_text = response.text.strip()
-        # 正規表現でJSON部分を抽出
-        match = re.search(r'```json\s*(.*)\s*```', json_text, re.DOTALL)
-        if match:
-            json_text = match.group(1)
+        raw_text = response.text.strip()
         
-        # JSONとしてパース
-        return json.loads(json_text)
+        # --- ここから堅牢なJSON抽出ロジック ---
+        json_string = None
+        
+        # 試行1: ```json ... ``` ブロックを正規表現で探す
+        match = re.search(r'```json\s*(\{.*?\})\s*```', raw_text, re.DOTALL)
+        if match:
+            json_string = match.group(1)
+        else:
+            # 試行2: ```がない場合、最初と最後の波括弧で囲まれた部分を探す
+            start_index = raw_text.find('{')
+            end_index = raw_text.rfind('}')
+            if start_index != -1 and end_index != -1 and start_index < end_index:
+                json_string = raw_text[start_index : end_index + 1]
 
-    # 同期的な処理を別スレッドで実行し、イベントループをブロックしないようにする
-    return await asyncio.to_thread(generate)
+        # 抽出した文字列をパースする
+        if json_string:
+            try:
+                return json.loads(json_string)
+            except json.JSONDecodeError as e:
+                print("\n--- JSONパースエラー ---")
+                print(f"エラー詳細: {e}")
+                print("パースに失敗した抽出済み文字列:", json_string)
+                print("--- AIからの生のレスポンス全体 ---")
+                print(raw_text)
+                print("------------------------------\n")
+                raise  # エラーを再送出して処理を中断
+        else:
+            # JSONを全く抽出できなかった場合
+            print("\n--- JSON抽出エラー ---")
+            print("AIのレスポンスからJSONオブジェクトを抽出できませんでした。")
+            print("--- AIからの生のレスポンス全体 ---")
+            print(raw_text)
+            print("------------------------------\n")
+            raise ValueError("AI response did not contain a valid JSON object.")
+        # --- ここまで ---
+
+    return await asyncio.to_thread(generate, api_key)
+
 
 # --- MAIN LOGIC (Async) ---
-
+# (main関数は変更なし)
 async def main():
     if len(sys.argv) < 2:
         print("使い方: python advanced_evaluation_runner.py <評価したい企業名>")
@@ -159,7 +201,7 @@ async def main():
 
         # 2. 初回評価＆改善案プロンプト生成
         print("\n--- [ステップ2/6] 初回ログを評価し、改善版プロンプトを生成中... ---")
-        initial_eval_prompt = create_initial_evaluation_prompt(initial_log)
+        initial_eval_prompt = create_initial_evaluation_prompt(initial_log, company_name)
         initial_eval_result = await call_gemini(initial_eval_prompt)
         suggested_prompt = initial_eval_result.get("suggestedPrompt")
         print(f"log: \n{suggested_prompt}")
@@ -187,7 +229,7 @@ async def main():
 
         # 5. 2回目の評価
         print("\n--- [ステップ5/6] 2回目のログを評価中... ---")
-        improved_eval_prompt = create_initial_evaluation_prompt(improved_log)
+        improved_eval_prompt = create_initial_evaluation_prompt(improved_log, company_name)
         improved_eval_result = await call_gemini(improved_eval_prompt)
         print(f"log: \n{improved_eval_result}")
         print("2回目の評価完了。")
@@ -213,6 +255,11 @@ async def main():
         print(f"\nエラー: 予期せぬエラーが発生しました。: {e}")
         traceback.print_exc()
     finally:
+        # 正常終了時も、エラー発生時も、必ず最後にセッションを保存する
+        print("\n[ApiKeyManager] セッション情報を保存しています...")
+        api_key_manager.save_session()
+        print("[ApiKeyManager] セッション情報を保存しました。")
+        
         # 一時ファイルをクリーンアップ
         if temp_prompt_file and os.path.exists(temp_prompt_file):
             os.remove(temp_prompt_file)
@@ -220,5 +267,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    # 非同期のmain関数を実行
     asyncio.run(main())

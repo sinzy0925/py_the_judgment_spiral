@@ -1,3 +1,7 @@
+# 詳細に理解して
+
+///
+
 Google GenAI SDKのドキュメント
 # 変更後を採用せよ！
 
@@ -1870,3 +1874,680 @@ Python でサポートされているパラメータの型は限られていま�
 最終更新日 2025-07-24 UTC。
 
 ///
+
+プロンプト設計は、言語モデルから正確で高品質なレスポンスを引き出すプロンプト（自然言語リクエスト）を作成するプロセスです。
+
+このページでは、Gemini AI モデルを最大限に活用するためのプロンプト設計の基本的なコンセプト、戦略、ベスト プラクティスについて説明します。
+
+トピック固有のプロンプト ガイド
+より具体的なプロンプト戦略をお探しですか？以下で、その他のプロンプト ガイドをご覧ください。
+
+メディア ファイルによるプロンプト
+画像生成のプロンプト
+動画生成のプロンプト
+Google AI Studio には、このガイドで説明されている多くのコンセプトをインタラクティブに紹介するプロンプト ギャラリーもあります。
+
+明確で具体的な指示
+モデルの動作を効果的かつ効率的にカスタマイズするには、明確で具体的な指示をモデルに提供します。指示は、質問、手順ごとのタスク、ユーザーの体験や考え方を示すような複雑な内容にすることもできます。
+
+入力
+入力は、モデルにレスポンスを提供させるプロンプトの必須テキストです。入力は、モデルが回答する質問（質問入力）、モデルが実行するタスク（タスク入力）、モデルが動作するエンティティ（エンティティ入力）、またはモデルが完了または続行する部分入力（コンプリーション入力）のいずれかです。
+
+入力タイプ	プロンプト	生成された出力
+質問	
+
+
+What's a good name for a flower shop that specializes in selling bouquets of
+dried flowers? Create a list of 5 options with just the names.
+
+
+Here are 10 names for a flower shop specializing in dried flowers:
+
+1. Everlasting Blooms
+2. Dried & Delightful
+3. The Petal Preserve
+4. Whispers of Wildflowers
+5. Forever Blooms
+タスク	
+
+Give me a simple list of just the things that I must bring on a camping trip. The list should have 5 items.
+
+1. **Tent:** Your shelter from the elements.
+2. **Sleeping Bag:** Stay warm and comfortable.
+3. **Sleeping Pad:** Insulation and cushioning for a good night's sleep.
+4. **Headlamp or Flashlight:** Light for nighttime activities.
+5. **First Aid Kit:** Be prepared for minor injuries.
+エンティティ	
+
+
+Classify the following items as [large, small]:
+Elephant
+Mouse
+Snail
+
+
+Here's the classification:
+
+* **Elephant:** Large
+* **Mouse:** Small
+* **Snail:** Small
+部分入力の補完
+生成言語モデルは、高度な予測入力ツールのように機能します。部分的なコンテンツを提供すると、モデルは残りのコンテンツ、またはコンテンツの継続として認識したコンテンツをレスポンスとして提供できます。その場合、例やコンテキストを含めると、モデルはそれらの例やコンテキストを考慮できます。
+
+次の例では、指示とエンティティ入力を含むプロンプトを示しています。
+
+プロンプト:
+
+For the given order, return a JSON object that has the fields cheeseburger, hamburger, fries, or
+drink, with the value being the quantity.
+
+Order: A burger and a drink.
+レスポンス:
+
+{
+"cheeseburger": 0,
+"hamburger": 1,
+"fries": 0,
+"drink": 1
+}
+（gemini-2.5-flash）
+モデルはプロンプトに従って動作しましたが、自然言語での指示は難しい場合があり、モデルの解釈に多くの負担が残ります。たとえば、レストランのメニューに多くのアイテムが含まれているとします。JSON レスポンスのサイズを小さくするには、オーダーされていないアイテムを省略します。この場合、例とレスポンス接頭辞を指定して、モデルに完成させることができます。
+
+プロンプト:
+
+Valid fields are cheeseburger, hamburger, fries, and drink.
+Order: Give me a cheeseburger and fries
+Output:
+```
+{
+"cheeseburger": 1,
+"fries": 1
+}
+```
+Order: I want two burgers, a drink, and fries.
+Output:
+レスポンス:
+
+```
+{
+"hamburger": 2,
+"drink": 1,
+"fries": 1
+}
+```
+（gemini-2.5-flash）
+「cheeseburger」は注文に含まれていないため、出力から除外されています。
+
+制約
+プロンプトの読み取りやレスポンスの生成に関する制約を指定します。行うべきことと、行うべきでないことをモデルに指示できます。たとえば、要約の長さについてプロンプトで制約を指定できます。
+
+プロンプト:
+
+
+Summarize this text in one sentence:
+Text: A quantum computer exploits quantum mechanical phenomena to perform calculations exponentially
+faster than any modern traditional computer. At very tiny scales, physical matter acts as both
+particles and as waves, and quantum computing uses specialized hardware to leverage this behavior.
+The operating principles of quantum devices is beyond the scope of classical physics. When deployed
+at scale, quantum computers could be used in a wide variety of applications such as: in
+cybersecurity to break existing encryption methods while helping researchers create new ones, in
+meteorology to develop better weather forecasting etc. However, the current state of the art quantum
+computers are still largely experimental and impractical.
+レスポンス:
+
+
+Exploiting quantum mechanical phenomena, quantum computers can perform calculations exponentially faster than traditional computers for potential applications like cybersecurity and meteorology, although they are currently largely experimental and impractical.
+（gemini-2.5-flash）
+回答の形式
+指示の中でレスポンスの形式を指定することもできます。たとえば、表、箇条書き、エレベーター ピッチ、キーワード、文、段落の形式でレスポンスを求めることができます。次のシステム指示は、レスポンスでより会話的な表現を使用するようにモデルに指示します。
+
+システム指示
+
+All questions should be answered comprehensively with details, unless the user requests a concise response specifically.
+プロンプト
+
+What is a smart way to make a business that sells DVD's in 2025?
+レスポンス:
+
+Starting a business selling DVDs in 2025 presents significant challenges due to the overwhelming dominance of digital streaming and on-demand services; a "smart" approach would therefore require a highly specialized niche, a strong value proposition beyond just the disc, and likely a focus on community or collector markets rather than mainstream consumption.
+
+Here's a breakdown of what a smart DVD business in 2025 would likely entail:
+
+1. Extreme Niche Specialization: You cannot compete with streaming libraries. Your business must focus on what digital doesn't offer easily or at all. This could include:
+
+* Out-of-Print & Rare Titles: Sourcing films or TV shows that have never been released digitally or are currently unavailable on major streaming platforms.
+....
+（gemini-2.5-flash）
+完了戦略を使用してレスポンスをフォーマットする
+完了戦略は、レスポンスの形式にも活用できます。次の例では、小論文の概要を作成するようにモデルに指示しています。
+
+プロンプト:
+
+Create an outline for an essay about hummingbirds.
+レスポンス:
+
+Here is a possible outline for an essay about hummingbirds:
+
+I. Introduction
+A. Hook: Start with a captivating fact or description about hummingbirds (e.g., their speed, iridescent colors, or tiny size).
+B. Background: Briefly introduce hummingbirds – where they are found (Americas), their reputation as unique birds.
+C. Thesis Statement: State the main point of the essay, which could be about the remarkable adaptations, behaviors, and ecological importance of hummingbirds.
+
+II. Appearance and Identification
+.....
+（gemini-2.5-flash）
+プロンプトでアウトラインの形式が指定されていないため、モデルによって形式が選択されています。モデルが特定の形式でアウトラインを返すようにするには、アウトラインの始点を表すテキストを追加し、開始パターンに基づいてモデルを完成させます。
+
+プロンプト:
+
+Create an outline for an essay about hummingbirds.
+I. Introduction
+*
+レスポンス:
+
+Okay, here is an outline for an essay about hummingbirds, starting from the introduction you provided:
+
+I. Introduction
+* Hook: Start with a captivating fact or description about hummingbirds (e.g., their speed, iridescent colors, or tiny size).
+* Background: Briefly introduce hummingbirds – where they are found (Americas), their reputation as unique birds, and their general characteristics.
+* Thesis Statement: State the main point of the essay, focusing on the remarkable adaptations, behaviors, and ecological significance that make hummingbirds extraordinary.
+.....
+（gemini-2.5-flash）
+ゼロショット プロンプトと少数ショット プロンプト
+プロンプトに、モデルに対して望ましい動作を示す例を含めることができます。モデルは、例からパターンと関係を特定し、回答を生成する際にそれらを適用します。いくつかの例を含むプロンプトは少数ショット プロンプトと呼ばれ、例のないプロンプトはゼロショット プロンプトと呼ばれます。少数ショット プロンプトは、モデルのレスポンスのフォーマット、フレーズ、範囲、一般的なパターンの設定を規制するために頻繁に使用されます。具体的で多様な例を使用して、モデルが焦点を絞り込み、より正確な結果を生成できるようにします。
+
+プロンプトには、常に少数ショットの例を含めることをおすすめします。少数ショットの例のないプロンプトは効果が低い可能性があります。タスクを説明するのに十分な例が含まれていれば、プロンプトから指示を削除することも可能です。
+
+次のゼロショット プロンプトでは、モデルに最良の説明を選択するよう求めます。
+
+プロンプト:
+
+Please choose the best explanation to the question:
+
+Question: How is snow formed?
+Explanation1: Snow is formed when water vapor in the air freezes into ice
+crystals in the atmosphere, which can combine and grow into snowflakes as they
+fall through the atmosphere and accumulate on the ground.
+Explanation2: Water vapor freezes into ice crystals forming snow.
+Answer:
+レスポンス:
+
+Explanation1 is the better explanation because it provides more detail on the
+process, including how ice crystals combine and grow into snowflakes as they
+fall through the atmosphere.
+（gemini-2.5-flash）
+ユースケースでモデルが簡潔なレスポンスを生成する必要がある場合は、簡潔なレスポンスを優先する例をプロンプトに含めることができます。
+
+次のプロンプトでは、短い説明を優先する例を 2 つ示します。レスポンスでは、前の例のような長い説明（Explanation1）ではなく、短い説明（Explanation2）を選択するように例がモデルをガイドしたことがわかります。
+
+プロンプト:
+Below are some examples showing a question, explanation, and answer format:
+
+Question: Why is the sky blue?
+Explanation1: The sky appears blue because of Rayleigh scattering, which causes
+shorter blue wavelengths of light to be scattered more easily than longer red
+wavelengths, making the sky look blue.
+Explanation2: Due to Rayleigh scattering effect.
+Answer: Explanation2
+
+Question: What is the cause of earthquakes?
+Explanation1: Sudden release of energy in the Earth's crust.
+Explanation2: Earthquakes happen when tectonic plates suddenly slip or break
+apart, causing a release of energy that creates seismic waves that can shake the
+ground and cause damage.
+Answer: Explanation1
+
+Now, Answer the following question given the example formats above:
+
+Question: How is snow formed?
+Explanation1: Snow is formed when water vapor in the air freezes into ice
+crystals in the atmosphere, which can combine and grow into snowflakes as they
+fall through the atmosphere and accumulate on the ground.
+Explanation2: Water vapor freezes into ice crystals forming snow.
+Answer:
+レスポンス:
+Answer: Explanation2
+（gemini-2.5-flash）
+最適なサンプル数
+Gemini などのモデルでは、多くの場合、いくつかの例を使用してパターンを検出できますが、最良の結果を得るには、プロンプトに与える例の数についてテストすることが必要な場合があります。同時に、過剰に多くの例を追加すると、モデルが例に対するレスポンスを過学習し始める可能性があります。
+
+パターンとアンチパターン
+例を使用して、従うべきパターンをモデルに示すほうが、回避すべきアンチパターンを例で示すよりも効果的です。
+
+⛔ ネガティブ パターン:
+
+例
+Don't end haikus with a question:
+Haiku are fun
+A short and simple poem
+Don't you enjoy them?
+
+✅ ポジティブ パターン:
+
+例
+Always end haikus with an assertion:
+Haiku are fun
+A short and simple poem
+A joy to write
+
+一貫性のある形式
+レスポンスが望ましくない形式で返されないように、少数ショットの例の構造と形式を同じにする必要があります。プロンプトに少数ショットの例を追加する主な目的の 1 つは、モデルにレスポンスの形式を示すことです。そのため、すべてのサンプルで形式を統一することが重要になります。特に、XML タグ、空白、改行、サンプルの分割子には注意してください。
+
+コンテキストを追加
+モデルに必要な情報がすべて与えられていると仮定するのではなく、モデルが問題を解決するために必要な指示や情報をプロンプトに含めることができます。このコンテキスト情報により、モデルは求められている内容について、制約と詳細を理解できます。
+
+次の例では、モデルにルーターのトラブルシューティング ガイダンスを提供するよう求めています。
+
+プロンプト:
+What should I do to fix my disconnected wifi? The light on my Google
+Wifi router is yellow and blinking slowly.
+レスポンス:
+A yellow blinking light on your Google Wifi router usually indicates a problem
+with the internet connection. Here are some steps to troubleshoot and fix the
+issue:
+1. Restart your router and modem:
+- Unplug your modem from the power outlet and wait for 30 seconds.
+- Plug your modem back in and wait for it to fully boot up.
+- Unplug your Google Wifi router and wait for 30 seconds.
+- Plug your Google Wifi router back in and wait for it to fully boot up.
+.....
+（gemini-2.5-flash）
+レスポンスは一般的なトラブルシューティング情報のように見えますが、ルーターや LED インジケーター ライトのステータスに固有のものではありません。
+
+特定のルーターに関するレスポンスをカスタマイズするには、ルーターのトラブルシューティング ガイドを、レスポンスの提供時に参照するコンテキストとしてプロンプトに追加します。
+
+プロンプト:
+Answer the question using the text below. Respond with only the text provided.
+Question: What should I do to fix my disconnected wifi? The light on my Google Wifi router is yellow and blinking slowly.
+
+Text:
+Color: Slowly pulsing yellow
+What it means: There is a network error.
+What to do:
+Check that the Ethernet cable is connected to both your router and your modem and both devices are turned on. You might need to unplug and plug in each device again.
+
+Color: Fast blinking yellow
+What it means: You are holding down the reset button and are factory resetting this device.
+What to do:
+If you keep holding down the reset button, after about 12 seconds, the light will turn solid yellow. Once it is solid yellow, let go of the factory reset button.
+
+Color: Solid yellow
+What it means: Router is factory resetting.
+What to do:
+This can take up to 10 minutes. When it's done, the device will reset itself and start pulsing white, letting you know it's ready for setup.
+
+Color: Solid red
+What it means: Something is wrong.
+What to do:
+Critical failure. Factory reset the router. If the light stays red, contact Wifi customer support.
+レスポンス:
+Check that the Ethernet cable is connected to both your router and your modem and both devices are turned on. You might need to unplug and plug in each device again.
+（gemini-2.5-flash）
+接頭辞を追加する
+接頭辞は、プロンプト コンテンツに追加する単語またはフレーズであり、接頭辞を付加する場所に応じてさまざまな目的で使用できます。
+
+入力接頭辞: モデルへの入力の意味的に重要な部分である入力シグナルに接頭辞を追加します。たとえば、接頭辞「English:」と「French:」は 2 つの異なる言語を識別可能にします。
+出力接頭辞: 出力はモデルによって生成されますが、プロンプトで出力に接頭辞を追加できます。出力接頭辞は、レスポンスとして期待される内容に関する情報をモデルに与えます。たとえば、出力接頭辞「JSON:」は、出力を JSON 形式にする必要があることをモデルに伝えます。
+接頭辞の例: 少数ショット プロンプトでは、例に接頭辞を追加すると、モデルが出力の生成時に使用できるラベルが提供されます。これにより、出力内容の解析が容易になります。
+次の例では、「Text:」が入力接頭辞であり、「The answer is:」が出力接頭辞です。
+
+プロンプト:
+Classify the text as one of the following categories.
+- large
+- small
+Text: Rhino
+The answer is: large
+Text: Mouse
+The answer is: small
+Text: Snail
+The answer is: small
+Text: Elephant
+The answer is:
+レスポンス:
+The answer is: large
+（gemini-2.5-flash）
+プロンプトをコンポーネントに分割する
+複雑なプロンプトを必要とするユースケースでは、プロンプトをより単純なコンポーネントに分割することで、モデルでこの複雑さを管理できるようになります。
+
+指示を分割する: 1 つのプロンプトに複数の指示を記述するのではなく、指示ごとに 1 つのプロンプトを作成します。ユーザーの入力に基づいて、処理するプロンプトを選択できます。
+
+プロンプトを連結する: 複数の連続したステップを含む複雑なタスクの場合は、各ステップをプロンプトにして、プロンプトを順番に連結します。プロンプトが順番に並んだこの連鎖では、シーケンス内の 1 つのプロンプトの出力が次のプロンプトの入力になります。シーケンス内の最後のプロンプトの出力が最終出力です。
+
+レスポンスを集計する: 集計とは、データのさまざまな部分に対して異なる並列タスクを実行し、結果を集計して最終出力を生成することです。たとえば、データの最初の部分に対して 1 つのオペレーションを実行し、残りのデータに対して別のオペレーションを実行して、結果を集計するようにモデルに指示できます。
+
+モデル パラメータをテストする
+モデルに送信する呼び出しの一つ一つに、モデルがどのようにレスポンスを生成するかを制御するパラメータ値が含まれています。このモデルは、パラメータ値によって異なる結果を生成できます。さまざまなパラメータ値を試して、タスクに最適な値を取得します。使用可能なパラメータはモデルに世代によって異なる場合があります。最も一般的なパラメータは次のとおりです。
+
+最大出力トークン: レスポンスで生成できるトークンの最大数を指定します。トークンは約 4 文字です。100 トークンは約 60 ～ 80 語に相当します。
+
+温度: 温度は、トークン選択のランダム性の度合いを制御します。温度は、レスポンス生成時のサンプリングに使用されます。レスポンス生成は、topP と topK が適用された場合に発生します。Temperature が低いほど、自由度や創造性を抑えた決定的な回答が求められるプロンプトに適しています。一方、Temperature が高いと、より多様で創造的な結果を導くことができます。Temperature 0 は決定的であり、最も高い確率のレスポンスが常に選択されることを意味します。
+
+topK: topK パラメータは、モデルが出力用にトークンを選択する方法を変更します。topK が 1 の場合、選択されるトークンは、モデルの語彙内のすべてのトークンで最も確率の高いものであることになります（グリーディ デコードとも呼ばれます）。topK が 3 の場合は、最も確率が高い上位 3 つのトークンから次のトークン選択されることになります（温度を使用します）。トークン選択ステップごとに、確率が最も高い topK トークンがサンプリングされます。その後、トークンは topP に基づいてさらにフィルタリングされ、最終的なトークンは温度サンプリングを用いて選択されます。
+
+topP: topP パラメータは、モデルが出力用にトークンを選択する方法を変更します。トークンは、確率の合計が topP 値と等しくなるまで、確率の高いものから低いものへと選択されます。たとえば、トークン A、B、C の確率が 0.3、0.2、0.1 で、topP 値が 0.5 だとします。このとき、モデルは次のトークンとして A か B を Temperature を使って選択し、C は候補から外します。デフォルトの topP 値は 0.95 です。
+
+stop_sequences: 停止シーケンスを設定して、コンテンツの生成を停止するようモデルに指示します。停止シーケンスには任意の文字列を使用できます。生成されたコンテンツに表示される可能性がある文字列は使用しないでください。
+
+プロンプトの反復処理に関する戦略
+プロンプトの設計では、望ましい回答を一貫して得られるようになるまでにイテレーション（反復）が何度か必要になる場合があります。このセクションでは、プロンプトを反復処理する際に試すことができるいくつかのガイダンスについて説明します。
+
+異なるフレーズを使用する: プロンプトで異なる単語やフレーズを使用すると、すべて同じ意味であっても、多くの場合、モデルの応答は異なります。プロンプトから期待される結果が得られない場合は、言い換えてみてください。
+
+Version 1:
+How do I bake a pie?
+
+Version 2:
+Suggest a recipe for a pie.
+
+Version 3:
+What's a good pie recipe?
+
+類似のタスクに切り替える: モデルに対してタスクの指示に従わせることができない場合は、同じ結果が得られる同様のタスクの指示を出してみてください。
+
+このプロンプトは、事前定義されたカテゴリを使用して書籍を分類するようモデルに指示します。
+
+プロンプト:
+Which category does The Odyssey belong to:
+thriller
+sci-fi
+mythology
+biography
+レスポンス:
+The Odyssey belongs to the category of **mythology**.
+
+Here's why:
+
+* **Mythology:** The Odyssey tells the story of Odysseus, a hero from Greek mythology, and his
+journey home after the Trojan War. It features gods, monsters, and supernatural events common to
+Greek mythology.
+.....
+（gemini-2.5-flash）
+レスポンスは正解ですが、モデルがオプションの境界内に収まっていません。また、完全な文ではなく、いずれかのオプションのみを使用して応答するようにモデル化する必要があります。この場合は、指示を多肢選択式の質問として言い換えて、モデルにオプションの選択を求めることができます。
+
+プロンプト:
+Multiple choice problem: Which of the following options describes the book The Odyssey?
+Options:
+
+
+
+thriller
+
+sci-fi
+
+mythology
+
+biography
+レスポンス:
+The correct answer is mythology.
+（gemini-2.5-flash）
+プロンプトのコンテンツの順序を変更する: プロンプト内のコンテンツの順序が回答に影響する場合があります。コンテンツの順序を変更して、レスポンスにどう影響するかを確認してみます。
+
+Version 1:
+[examples]
+[context]
+[input]
+
+Version 2:
+[input]
+[examples]
+[context]
+
+Version 3:
+[examples]
+[input]
+[context]
+フォールバック レスポンス
+フォールバック レスポンスは、プロンプトまたはレスポンスのいずれかが安全フィルタをトリガーした場合に、モデルが返すレスポンスです。フォールバック レスポンスの例としては、「私は言語モデルにすぎないため、それについては対応できません」が挙げられます。
+
+モデルがフォールバック レスポンスを返す場合は、温度を上げてみてください。
+
+非推奨事項
+事実に基づく情報の生成についてモデルに頼ることは回避してください。
+数学や論理の問題では慎重に使用してください。
+生成モデルの仕組み
+このセクションでは、生成モデルのレスポンスにランダム性はありますか？それとも確定的ですか？という質問に答えます。
+
+簡単に言うと、どちらも可能です。生成モデルにプロンプトを送信すると、テキスト レスポンスが 2 つのステージで生成されます。最初のステージでは、生成モデルが入力プロンプトを処理し、次に続く可能性のあるトークン（単語）の確率分布を生成します。たとえば、入力テキスト「The dog jumped over the ...」をプロンプトとして指定すると、生成モデルは次に続く可能性のある単語の配列を生成します。
+
+[("fence", 0.77), ("ledge", 0.12), ("blanket", 0.03), ...]
+このプロセスは決定的です。生成モデルは、同じプロンプト テキストが入力されるたびに、同じ分布を生成します。
+
+2 番目のステージでは、生成モデルが複数のデコード戦略のいずれかを使用して、これらの分布を実際のテキスト レスポンスに変換します。単純なデコード戦略では、各タイムステップで最も可能性の高いトークンを選択します。このプロセスは常に確定的です。代わりに、モデルから返された分布からランダムにサンプリングしてレスポンスを生成することもできます。このプロセスは確率的（ランダム）です。温度を設定して、このデコード プロセスで許可されるランダム性の度合いを制御します。温度が 0 の場合、最も可能性の高いトークンのみが選択され、ランダム性は発生しません。逆に、温度が高いと、モデルによって選択されるトークンに高いランダム性が導入され、予期しない驚くようなモデル レスポンスが生成されます。
+
+
+
+最終更新日 2025-07-24 UTC。
+
+///
+
+
+Gemini などの生成 AI モデルは、入力と出力をトークンという粒度で処理します。
+
+トークンについて
+トークンは、z などの単一の文字や、cat などの単語全体にすることができます。長い単語は複数のトークンに分割されます。モデルで使用されるすべてのトークンのセットは語彙と呼ばれ、テキストをトークンに分割するプロセスはトークン化と呼ばれます。
+
+Gemini モデルの場合、1 個のトークンは約 4 文字に相当します。100 個のトークンは、約 60 ～ 80 ワード（英語）に相当します。
+
+課金が有効になっている場合、Gemini API の呼び出しの費用は、入力トークンと出力トークンの数によって決まるため、トークンのカウント方法を把握しておくと便利です。
+
+Colab でトークンのカウントを試す
+Colab を使用してトークンのカウントを試すことができます。
+
+Colab ノートブックを試す
+GitHub でノートブックを表示
+コンテキスト ウィンドウ
+Gemini API で利用可能なモデルのコンテキスト ウィンドウはトークンで測定されます。コンテキスト ウィンドウは、指定できる入力量とモデルが生成できる出力量を定義します。コンテキスト ウィンドウのサイズを確認するには、getModels エンドポイントを呼び出すか、モデルのドキュメントをご覧ください。
+
+次の例では、gemini-1.5-flash モデルの入力上限が約 1,000,000 トークンで、出力上限が約 8,000 トークンであることがわかります。つまり、コンテキスト ウィンドウは 1,000,000 トークンです。
+
+
+from google import genai
+
+client = genai.Client()
+model_info = client.models.get(model="gemini-2.0-flash")
+print(f"{model_info.input_token_limit=}")
+print(f"{model_info.output_token_limit=}")
+# ( e.g., input_token_limit=30720, output_token_limit=2048 )
+
+トークンのカウント
+Gemini API の入出力はすべてトークン化されます。これには、テキスト、画像ファイル、その他のテキスト以外のモダリティが含まれます。
+
+トークンは次の方法でカウントできます。
+
+リクエストの入力を指定して count_tokens を呼び出します。
+入力のみのトークンの合計数を返します。モデルに入力を送信する前にこの呼び出しを行うと、リクエストのサイズを確認できます。
+
+generate_content を呼び出した後に、response オブジェクトの usage_metadata 属性を使用します。
+入力と出力の両方のトークンの合計数 total_token_count を返します。
+また、入力と出力のトークン数（prompt_token_count（入力トークン）と candidates_token_count（出力トークン））も個別に返します。
+
+テキスト トークンをカウントする
+テキストのみの入力で count_tokens を呼び出すと、入力のみのテキストのトークン数（total_tokens）が返されます。generate_content を呼び出す前にこの呼び出しを行うと、リクエストのサイズを確認できます。
+
+別の方法として、generate_content を呼び出して、response オブジェクトの usage_metadata 属性を使用して、次のように取得することもできます。
+
+入力（prompt_token_count）と出力（candidates_token_count）の個別のトークン数
+入力と出力の両方のトークンの合計数（total_token_count）
+
+from google import genai
+
+client = genai.Client()
+prompt = "The quick brown fox jumps over the lazy dog."
+
+# Count tokens using the new client method.
+total_tokens = client.models.count_tokens(
+    model="gemini-2.0-flash", contents=prompt
+)
+print("total_tokens: ", total_tokens)
+# ( e.g., total_tokens: 10 )
+
+response = client.models.generate_content(
+    model="gemini-2.0-flash", contents=prompt
+)
+
+# The usage_metadata provides detailed token counts.
+print(response.usage_metadata)
+# ( e.g., prompt_token_count: 11, candidates_token_count: 73, total_token_count: 84 )
+
+マルチターン（チャット）トークンをカウントする
+チャット履歴で count_tokens を呼び出すと、チャットの各ロールのテキストのトークン数の合計（total_tokens）が返されます。
+
+別の方法として、send_message を呼び出して、response オブジェクトの usage_metadata 属性を使用して、次のように取得することもできます。
+
+入力（prompt_token_count）と出力（candidates_token_count）の個別のトークン数
+入力と出力の両方のトークンの合計数（total_token_count）
+次の会話のターンの大きさを把握するには、count_tokens を呼び出すときに、そのターンを履歴に追加する必要があります。
+
+
+from google import genai
+from google.genai import types
+
+client = genai.Client()
+
+chat = client.chats.create(
+    model="gemini-2.0-flash",
+    history=[
+        types.Content(
+            role="user", parts=[types.Part(text="Hi my name is Bob")]
+        ),
+        types.Content(role="model", parts=[types.Part(text="Hi Bob!")]),
+    ],
+)
+# Count tokens for the chat history.
+print(
+    client.models.count_tokens(
+        model="gemini-2.0-flash", contents=chat.get_history()
+    )
+)
+# ( e.g., total_tokens: 10 )
+
+response = chat.send_message(
+    message="In one sentence, explain how a computer works to a young child."
+)
+print(response.usage_metadata)
+# ( e.g., prompt_token_count: 25, candidates_token_count: 21, total_token_count: 46 )
+
+# You can count tokens for the combined history and a new message.
+extra = types.UserContent(
+    parts=[
+        types.Part(
+            text="What is the meaning of life?",
+        )
+    ]
+)
+history = chat.get_history()
+history.append(extra)
+print(client.models.count_tokens(model="gemini-2.0-flash", contents=history))
+# ( e.g., total_tokens: 56 )
+
+マルチモーダル トークンをカウントする
+Gemini API へのすべての入力は、テキスト、画像ファイル、その他のテキスト以外のモダリティを含むトークン化されます。Gemini API による処理中のマルチモーダル入力のトークン化に関する主なポイントは次のとおりです。
+
+Gemini 2.0 では、両方の寸法が 384 ピクセル以下の画像入力は 258 個のトークンとしてカウントされます。1 つまたは両方の寸法が大きい画像は、必要に応じて切り抜かれ、768x768 ピクセルのタイルにスケーリングされます。各タイルは 258 個のトークンとしてカウントされます。Gemini 2.0 より前は、画像は固定の 258 個のトークンを使用していました。
+
+動画ファイルと音声ファイルは、動画は 263 トークン / 秒、音声は 32 トークン / 秒の固定レートでトークンに変換されます。
+
+画像ファイル
+テキストと画像の入力で count_tokens を呼び出すと、テキストと画像の合計トークン数が入力のみで返されます（total_tokens）。generate_content を呼び出す前にこの呼び出しを行うと、リクエストのサイズを確認できます。必要に応じて、テキストとファイルで count_tokens を個別に呼び出すこともできます。
+
+別の方法として、generate_content を呼び出して、response オブジェクトの usage_metadata 属性を使用して、次のように取得することもできます。
+
+入力（prompt_token_count）と出力（candidates_token_count）の個別のトークン数
+入力と出力の両方のトークンの合計数（total_token_count）
+注: File API を使用してアップロードされたファイルを使用する場合も、ファイルをインライン データとして指定する場合も、トークン数は同じになります。
+File API からアップロードされた画像を使用する例:
+
+
+from google import genai
+
+client = genai.Client()
+prompt = "Tell me about this image"
+your_image_file = client.files.upload(file=media / "organ.jpg")
+
+print(
+    client.models.count_tokens(
+        model="gemini-2.0-flash", contents=[prompt, your_image_file]
+    )
+)
+# ( e.g., total_tokens: 263 )
+
+response = client.models.generate_content(
+    model="gemini-2.0-flash", contents=[prompt, your_image_file]
+)
+print(response.usage_metadata)
+# ( e.g., prompt_token_count: 264, candidates_token_count: 80, total_token_count: 345 )
+
+画像をインライン データとして提供する例:
+
+
+from google import genai
+import PIL.Image
+
+client = genai.Client()
+prompt = "Tell me about this image"
+your_image_file = PIL.Image.open(media / "organ.jpg")
+
+# Count tokens for combined text and inline image.
+print(
+    client.models.count_tokens(
+        model="gemini-2.0-flash", contents=[prompt, your_image_file]
+    )
+)
+# ( e.g., total_tokens: 263 )
+
+response = client.models.generate_content(
+    model="gemini-2.0-flash", contents=[prompt, your_image_file]
+)
+print(response.usage_metadata)
+# ( e.g., prompt_token_count: 264, candidates_token_count: 80, total_token_count: 345 )
+
+動画ファイルまたは音声ファイル
+音声と動画は、それぞれ次の固定レートでトークンに変換されます。
+
+動画: 1 秒あたり 263 トークン
+オーディオ: 1 秒あたり 32 トークン
+テキストと動画/音声の入力で count_tokens を呼び出すと、テキストと動画/音声ファイルの合計トークン数が入力のみで返されます（total_tokens）。generate_content を呼び出す前にこの呼び出しを行うと、リクエストのサイズを確認できます。必要に応じて、テキストとファイルで count_tokens を個別に呼び出すこともできます。
+
+別の方法として、generate_content を呼び出して、response オブジェクトの usage_metadata 属性を使用して、次のように取得することもできます。
+
+入力（prompt_token_count）と出力（candidates_token_count）の個別のトークン数
+入力と出力の両方のトークンの合計数（total_token_count）
+注: File API を使用してアップロードされたファイルを使用する場合も、ファイルをインライン データとして指定する場合も、トークン数は同じになります。
+
+from google import genai
+import time
+
+client = genai.Client()
+prompt = "Tell me about this video"
+your_file = client.files.upload(file=media / "Big_Buck_Bunny.mp4")
+
+# Poll until the video file is completely processed (state becomes ACTIVE).
+while not your_file.state or your_file.state.name != "ACTIVE":
+    print("Processing video...")
+    print("File state:", your_file.state)
+    time.sleep(5)
+    your_file = client.files.get(name=your_file.name)
+
+print(
+    client.models.count_tokens(
+        model="gemini-2.0-flash", contents=[prompt, your_file]
+    )
+)
+# ( e.g., total_tokens: 300 )
+
+response = client.models.generate_content(
+    model="gemini-2.0-flash", contents=[prompt, your_file]
+)
+print(response.usage_metadata)
+# ( e.g., prompt_token_count: 301, candidates_token_count: 60, total_token_count: 361 )
+
+システムの指示とツール
+システムの手順とツールも、入力のトークン数の合計にカウントされます。
+
+システム指示を使用すると、system_instruction の追加を反映して total_tokens の数が増加します。
+
+関数呼び出しを使用すると、tools の追加を反映して total_tokens の数が加算されます。
+
+
+最終更新日 2025-07-24 UTC。
+

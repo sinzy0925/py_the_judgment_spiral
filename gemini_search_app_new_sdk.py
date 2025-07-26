@@ -8,11 +8,12 @@ import asyncio
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
+import sys
 
 # 作成したAPIキーマネージャーをインポート
 from api_key_manager import api_key_manager
 
-# .envファイルから環境変数を読み込む（ApiKeyManagerより先に実行されるのが望ましい）
+# .envファイルから環境変数を読み込む
 load_dotenv()
 
 def _blocking_call_to_gemini(api_key: str, full_contents: str):
@@ -25,19 +26,16 @@ def _blocking_call_to_gemini(api_key: str, full_contents: str):
         full_contents (str): モデルに渡す完全なプロンプト。
     """
     
-    # 受け取ったAPIキーでクライアントを初期化
     if not api_key:
         print("\nエラー: _blocking_call_to_gemini に有効なAPIキーが渡されませんでした。")
         return None, None
     try:
         client = genai.Client(api_key=api_key)
-        key_info = api_key_manager.last_used_key_info
-        print(f"[INFO] メインAPIコール: キー (index: {key_info['index']}, ...{key_info['key_snippet']}) を使用します。")
     except Exception as e:
-        print(f"\nエラー: APIクライアントの初期化に失敗しました: {e}")
+        print(f"\nエラー: APIクライアントの初期化に失敗しました: {e}", file=sys.stderr)
+        # エラー発生時はNoneを返して異常を伝える
         return None, None
         
-    # モデルとツールの設定
     config = types.GenerateContentConfig(
         tools=[types.Tool(google_search=types.GoogleSearch())],
         thinking_config=types.ThinkingConfig(
@@ -46,8 +44,9 @@ def _blocking_call_to_gemini(api_key: str, full_contents: str):
         )
     )
 
-    # ストリーム生成
     print(f"'{full_contents.splitlines()[0]}' について、AIが思考を開始します...")
+    
+    api_call_start_time = time.time() 
     try:
         stream = client.models.generate_content_stream(
             model='gemini-2.5-flash',
@@ -55,12 +54,9 @@ def _blocking_call_to_gemini(api_key: str, full_contents: str):
             config=config,
         )
     except Exception as e:
-        print(f"\nAPI呼び出し中にエラーが発生しました: {e}")
+        print(f"\nAPI呼び出し中にエラーが発生しました: {e}", file=sys.stderr)
         return None, None
     
-    # ストリーム処理
-    api_call_start_time = time.time()
-    print(f"[{time.time() - api_call_start_time:.2f}s] API呼び出し成功、ストリーム受信待機中...")
     is_first_thought = True
     is_first_answer = True
     first_chunk_received = False
@@ -72,7 +68,7 @@ def _blocking_call_to_gemini(api_key: str, full_contents: str):
         for chunk in stream:
             if not first_chunk_received:
                 first_chunk_received = True
-                print(f"[{time.time() - api_call_start_time:.2f}s] 最初のチャンクを受信しました。")
+                print(f"[{time.time() - api_call_start_time:.2f}s] API呼び出し成功、最初のチャンクを受信しました。")
 
             if not chunk.candidates:
                 continue
@@ -99,7 +95,8 @@ def _blocking_call_to_gemini(api_key: str, full_contents: str):
         return thinking_text, answer_text
     
     except Exception as e:
-        print(f"\nストリームの処理中に予期せぬエラーが発生しました: {e}")
+        # ストリーム処理中のエラーも標準エラー出力へ
+        print(f"\nストリームの処理中に予期せぬエラーが発生しました: {e}", file=sys.stderr)
         return None, None
 
 def _blocking_count_tokens(api_key: str, model: str, contents: str) -> types.CountTokensResponse | None:
@@ -107,15 +104,13 @@ def _blocking_count_tokens(api_key: str, model: str, contents: str) -> types.Cou
     APIキーを使ってクライアントを初期化し、トークン数を計算する同期関数。
     """
     if not api_key:
-        print("\nエラー: _blocking_count_tokens に有効なAPIキーが渡されませんでした。")
+        print("\nエラー: _blocking_count_tokens に有効なAPIキーが渡されませんでした。", file=sys.stderr)
         return None
     try:
         client = genai.Client(api_key=api_key)
-        key_info = api_key_manager.last_used_key_info
-        print(f"[INFO] トークン数計算: キー (index: {key_info['index']}, ...{key_info['key_snippet']}) を使用します。")
         return client.models.count_tokens(model=model, contents=contents)
     except Exception as e:
-        print(f"\nトークン計算中にエラーが発生しました: {e}")
+        print(f"\nトークン計算中にエラーが発生しました: {e}", file=sys.stderr)
         return None
 
 async def main():
@@ -128,10 +123,24 @@ async def main():
     args = parser.parse_args()
 
     start_time = time.time()
-    question = args.query
+    
+    # <<< ここからロジックを修正 >>>
+    full_contents = ""
 
-    # プロンプトの準備
-    prompt_template="""以下の企業について、公開情報から徹底的に調査し、結果を下記のJSON形式で厳密に出力してください。
+    if args.prompt_file:
+        # --- --prompt-fileが指定された場合（改善後実行）のルート ---
+        try:
+            print(f"INFO: プロンプトファイル '{args.prompt_file}' を読み込みます。")
+            with open(args.prompt_file, 'r', encoding='utf-8') as f:
+                # ファイルの内容をそのまま最終的なプロンプトとして使用
+                full_contents = f.read()
+        except FileNotFoundError:
+            print(f"エラー: プロンプトファイルが見つかりません: {args.prompt_file}", file=sys.stderr)
+            sys.exit(1) # エラーが見つかったら異常終了
+    else:
+        # --- --prompt-fileが指定されていない場合（初回実行）のルート ---
+        print("INFO: デフォルトのプロンプトテンプレートを使用します。")
+        prompt_template="""以下の企業について、公開情報から徹底的に調査し、結果を下記のJSON形式で厳密に出力してください。
 
 調査対象企業： {company_name}
 
@@ -158,82 +167,92 @@ async def main():
   "businessSummary": "事業内容の簡潔な要約（string）",
   "strengths": "企業の強みや特徴（string）"
 }}
-"""
+```"""
+        # デフォルトテンプレートに企業名を埋め込む
+        full_contents = prompt_template.format(company_name=args.query)
 
-    if args.prompt_file:
-    try:
-        with open(args.prompt_file, 'r', encoding='utf-8') as f:
-            prompt_template = f.read()
-    except FileNotFoundError:
-        print(f"エラー: プロンプトファイルが見つかりません: {args.prompt_file}")
-    return
+    if not full_contents:
+        print("エラー: 実行するプロンプトが空です。", file=sys.stderr)
+        sys.exit(1)
+    # <<< ここまでロジックを修正 >>>
 
-full_contents = prompt_template.format(company_name=question)
+    print(f"プロンプト: \n{full_contents[:200]}...")
 
-print(f"プロンプト: \n{full_contents[:200]}...")
+    input_tokens, thinking_tokens, answer_tokens = 0, 0, 0
 
-input_tokens = 0
-thinking_tokens = 0
-answer_tokens = 0
-
-try:
     # 1. 入力トークン計算
     input_key = await api_key_manager.get_next_key()
-    input_token_response = await asyncio.to_thread(
-        _blocking_count_tokens, input_key, 'gemini-2.5-flash', full_contents
-    )
-    if input_token_response:
-        input_tokens = input_token_response.total_tokens
+    if input_key:
+        key_info = api_key_manager.last_used_key_info 
+        print(f"[INFO] 入力トークン計算用にキー (index: {key_info['index']}, ...{key_info['key_snippet']}) を取得。")
+        input_token_response = await asyncio.to_thread(
+            _blocking_count_tokens, input_key, 'gemini-2.5-flash', full_contents
+        )
+        if input_token_response:
+            input_tokens = input_token_response.total_tokens
 
     # 2. Geminiへのメイン処理
     main_call_key = await api_key_manager.get_next_key()
+    # メイン処理でキーが取得できない場合は致命的エラーとして終了
+    if not main_call_key:
+        print("エラー: メイン処理用のAPIキーを取得できませんでした。", file=sys.stderr)
+        sys.exit(1)
+        
+    key_info = api_key_manager.last_used_key_info 
+    print(f"[INFO] メイン処理用にキー (index: {key_info['index']}, ...{key_info['key_snippet']}) を取得。")
     thinking_text, answer_text = await asyncio.to_thread(
         _blocking_call_to_gemini, main_call_key, full_contents
     )
 
+    # thinking_text と answer_text がNoneの場合、API呼び出しでエラーが起きている
+    if thinking_text is None and answer_text is None:
+        print("エラー: Geminiからの応答取得に失敗しました。処理を中断します。", file=sys.stderr)
+        sys.exit(1)
+        
     # 3. 出力トークン計算
     if thinking_text:
         thinking_key = await api_key_manager.get_next_key()
-        thinking_token_response = await asyncio.to_thread(
-            _blocking_count_tokens, thinking_key, 'gemini-2.5-flash', thinking_text
-        )
-        if thinking_token_response:
-            thinking_tokens = thinking_token_response.total_tokens
-    
+        if thinking_key:
+            key_info = api_key_manager.last_used_key_info 
+            print(f"[INFO] 思考トークン計算用にキー (index: {key_info['index']}, ...{key_info['key_snippet']}) を取得。")
+            thinking_token_response = await asyncio.to_thread(
+                _blocking_count_tokens, thinking_key, 'gemini-2.5-flash', thinking_text
+            )
+            if thinking_token_response:
+                thinking_tokens = thinking_token_response.total_tokens
+
     if answer_text:
         answer_key = await api_key_manager.get_next_key()
-        answer_token_response = await asyncio.to_thread(
-            _blocking_count_tokens, answer_key, 'gemini-2.5-flash', answer_text
-        )
-        if answer_token_response:
-            answer_tokens = answer_token_response.total_tokens
+        if answer_key:
+            key_info = api_key_manager.last_used_key_info 
+            print(f"[INFO] 回答トークン計算用にキー (index: {key_info['index']}, ...{key_info['key_snippet']}) を取得。")
+            answer_token_response = await asyncio.to_thread(
+                _blocking_count_tokens, answer_key, 'gemini-2.5-flash', answer_text
+            )
+            if answer_token_response:
+                answer_tokens = answer_token_response.total_tokens
 
     print("\n------------------------------")
+    end_time = time.time()
+    print(f"\n総実行時間: {end_time - start_time:.2f}秒")
+    print(f"[ログ] 入力トークン数: {input_tokens}")
+    print(f"[ログ] 思考トークン数: {thinking_tokens}")
+    print(f"[ログ] 回答トークン数: {answer_tokens}")
+    total_output_tokens = thinking_tokens + answer_tokens
+    print(f"[ログ] 合計出力トークン数: {total_output_tokens}")
+    print(f"[ログ] 総計トークン数: {input_tokens + total_output_tokens}")
 
-except Exception as e:
-    if 'api_key' in str(e).lower() or 'credential' in str(e).lower():
-         print("\nエラー: APIキーが見つからないか、無効です。")
-         print(".envファイルに 'GOOGLE_API_KEY' または 'GOOGLE_API_KEY_n' が正しく設定されているか確認してください。")
-    else:
-        print(f"\nメイン処理で予期せぬエラーが発生しました: {e}")
-
-finally:
-    # アプリケーション終了時にセッションを保存
-    api_key_manager.save_session()
-    print("[INFO] セッションを保存しました。")
-
-end_time = time.time()
-print(f"\n総実行時間: {end_time - start_time:.2f}秒")
-print(f"[ログ] 入力トークン数: {input_tokens}")
-print(f"[ログ] 思考トークン数: {thinking_tokens}")
-print(f"[ログ] 回答トークン数: {answer_tokens}")
-total_output_tokens = thinking_tokens + answer_tokens
-print(f"[ログ] 合計出力トークン数: {total_output_tokens}")
-print(f"[ログ] 総計トークン数: {input_tokens + total_output_tokens}")
-
-if name == "main":
-try:
-    # メインの非同期関数を実行
-    asyncio.run(main())
-except KeyboardInterrupt:
-    print("\nプログラムが中断されました。")
+if __name__ == "__main__":
+    exit_code = 0
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nプログラムが中断されました。")
+        exit_code = 130
+    except Exception as e:
+        print(f"予期せぬ致命的なエラーが発生しました: {e}", file=sys.stderr)
+        exit_code = 1 
+    finally:
+        api_key_manager.save_session()
+        print("[INFO] アプリケーション終了に伴いセッションを保存しました。")
+        sys.exit(exit_code)
