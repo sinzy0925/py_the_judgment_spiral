@@ -50,7 +50,7 @@ def _blocking_call_to_gemini(api_key: str, full_contents: str):
     api_call_start_time = time.time() 
     try:
         stream = client.models.generate_content_stream(
-            model='gemini-2.5-flash',
+            model='gemini-2.5-pro',
             contents=full_contents,
             config=config,
         )
@@ -90,7 +90,7 @@ def _blocking_call_to_gemini(api_key: str, full_contents: str):
                         print("\n\n[最終的な回答]:")
                         is_first_answer = False
                     res = re.sub(r'```json|```', '', part.text)
-                    print(res, end="", flush=True)
+                    print(res, end="", flush=True)#
         
         print(f"\n[{time.time() - api_call_start_time:.2f}s] 全ストリーム受信完了。")
         return thinking_text, answer_text
@@ -120,6 +120,7 @@ async def main():
     parser = argparse.ArgumentParser(description="企業情報を検索するGeminiアプリ")
     parser.add_argument("query", help="検索対象の企業名と住所")
     parser.add_argument("--prompt-file", help="プロンプトが記述されたテキストファイルのパス")
+    parser.add_argument("--param", help="パラメータの値を指定するオプション")
     args = parser.parse_args()
 
     start_time = time.time()
@@ -145,36 +146,113 @@ async def main():
         input_count = len(companies)
 
         prompt_template="""
+# 調査対象リスト
 - {company_name}
 
-# 上記の複数の企業について、ルールに従い、以下のJSON形式で出力してください。
+# あなたの役割
+あなたは、与えられたリストの各項目について、Web上の信頼できる情報源を基に、
+正確な情報をファクトチェックする専門のリサーチャーです。
 
-# ルール
-### *業種を特定する事のみに専念し、他の事は調べないでください。*
-### *入力された、複数の会社名　住所の情報から、業種を特定してください。*
-### *入力された、会社の件数を数えてください。*
+# 任務
+以下の【調査対象リスト】に含まれる条件に基づいて、**必ずGoogle検索ツールを使って**、
+それぞれの**「最新の正確な名称」と「最新の正確な住所」**を調査してください。
 
-# 出力形式 (JSON)
-### 通常調査レポート
-```json
-{{
-  "status": "success",
-  "count": "処理件数(int)",
-  "data": [
-      {{
-        "companyName": "企業の正式名称（string）",
-        "industry": "主要な業種（string）"
-      }}
-  ]
-}}```
+
+# 厳守すべきルール
+1.  **情報の源泉:** あなたの回答は、**必ずGoogle検索で得られた信頼できる情報源（公式サイトのスニペット、地図情報のスニペット）
+    **に基づいていなければなりません。プロンプト内の情報は参考程度とし、鵜呑みにしないでください。
+2.  **ファクトチェックの徹底:** 名称と住所を基に、正しい住所を再検証してください。
+3.  **欠損情報の扱い:** 調査してもがどうしても見つからない場合は、住所の値を `不正確` としてください。
+
+# 出力形式
+```markdown
+- 名称１,住所
+- 名称２,住所
+- ...  
+
+```
 """
-        full_contents = prompt_template.format(company_name=args.query)
+
+        prompt_template2="""
+# 調査対象リスト
+- {company_name}
+
+# あなたの役割
+あなたは、与えられたリストの各項目について、Web上の信頼できる情報源を基に、
+正確な情報をファクトチェックする専門のリサーチャーです。
+
+# 任務
+以下の【調査対象リスト】に含まれる条件に基づいて、**必ずGoogle検索ツールを使って**、
+それぞれの**「最新の正確な名称」と「最新の正確な住所」**を調査してください。
+調査対象リストには、間違いが多数含まれています。間違いを見つけたら、住所にnullを入力してください。
+
+
+# 厳守すべきルール
+1.  **情報の源泉:** あなたの回答は、**必ずGoogle検索で得られた信頼できる情報源（公式サイト、地図情報、信頼できるサイトなど）
+    **に基づいていなければなりません。プロンプト内の情報は参考程度とし、鵜呑みにしないでください。
+2.  **ファクトチェックの徹底:** 名称と住所を基に、正しい住所を再検証してください。
+3.  **欠損情報の扱い:** 調査してもがどうしても見つからない場合は、住所の値を `不正確` としてください。
+
+# 出力形式
+```markdown
+- 名称１,住所
+- 名称２,住所
+- ...  
+
+```
+"""
+
+
+        prompt_template3="""
+
+# 調査対象リスト
+- {company_name}
+
+# あなたの役割
+あなたは、与えられたリストの各項目について、Web上の信頼できる情報源を基に、
+正確な情報をファクトチェックする専門のリサーチャーです。
+
+# 任務
+以下の【調査対象リスト】に含まれる名称について、**必ずGoogle検索ツールを使って**、
+それぞれの**「最新の正確な住所」と「公式な電話番号」**を調査してください。
+
+
+# 厳守すべきルール
+1.  **情報の源泉:** あなたの回答は、**必ずGoogle検索で得られた信頼できる情報源（公式サイト、地図情報、信頼できるサイトなど）
+    **に基づいていなければなりません。プロンプト内の情報は参考程度とし、鵜呑みにしないでください。
+2.  **ファクトチェックの徹底:** 名称と「大阪市天王寺区」という情報を基に、正しい住所と電話番号を再検証してください。
+3.  **欠損情報の扱い:** 調査しても電話番号がどうしても見つからない場合は、電話番号の値を `null` としてください。
+4.  **出力形式:** 思考プロセスは不要です。最終的な結果のみを、以下の形式のJSON配列として出力してください。
+
+# 出力形式
+```json
+[
+  {{
+    "name": "名称",
+    "address": "（調査で判明した正確な住所）",
+    "tel": "（調査で判明した電話番号、またはnull）"
+  }},
+  {{
+    "name": "名称",
+    "address": "（調査で判明した正確な住所）",
+    "tel": "（調査で判明した電話番号、またはnull）"
+  }}
+]
+"""
+        if args.param:
+            if args.param == "1":
+                full_contents = prompt_template.format(company_name=args.query)
+            elif args.param == "2":
+                full_contents = prompt_template2.format(company_name=args.query)
+            elif args.param == "3":
+                full_contents = prompt_template3.format(company_name=args.query)
+            
 
     if not full_contents:
         print("エラー: 実行するプロンプトが空です。", file=sys.stderr)
         sys.exit(1)
 
-    print(f"プロンプト: \n{full_contents[:300]}...")
+    print(f"プロンプト: \n{full_contents}\n\n")
 
     input_tokens, thinking_tokens, answer_tokens = 0, 0, 0
 
@@ -241,6 +319,32 @@ async def main():
     total_output_tokens = thinking_tokens + answer_tokens
     print(f"[ログ] 合計出力トークン数: {total_output_tokens}")
     print(f"[ログ] 総計トークン数: {input_tokens + total_output_tokens}")
+
+    logdata= f"""\n\n---\n\nプロンプト:{prompt_template}
+総実行時間: {end_time - start_time:.2f}秒
+[ログ] 入力件数: {input_count}
+[ログ] 入力トークン数: {input_tokens}
+[ログ] 思考トークン数: {thinking_tokens}
+[ログ] 回答トークン数: {answer_tokens}
+[ログ] 合計出力トークン数: {total_output_tokens}
+[ログ] 総計トークン数: {input_tokens + total_output_tokens}
+
+"""
+
+    log_dir = 'log'
+    os.makedirs(log_dir, exist_ok=True)
+    file_path = os.path.join(log_dir, 'output.log')
+    try:
+        # 'a'は追記モード、'utf-8'は文字化けを防ぐために指定します
+        with open(file_path, 'a', encoding='utf-8') as f:
+            # f.write()で書き込み、末尾に改行を追加します
+            f.write(logdata)
+        
+        print(f"'{file_path}' に内容を追記しました。")
+
+    except IOError as e:
+        print(f"ファイルへの書き込み中にエラーが発生しました: {e}")
+
 
 if __name__ == "__main__":
     exit_code = 0
