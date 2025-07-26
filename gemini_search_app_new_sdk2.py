@@ -1,4 +1,4 @@
-# gemini_search_app_new_sdk.py (修正後)
+# gemini_search_app_new_sdk.py (最終ログ出力修正版)
 
 import os
 import sys
@@ -10,6 +10,7 @@ from google.genai import types
 from dotenv import load_dotenv
 import sys
 import json
+import re
 
 # 作成したAPIキーマネージャーをインポート
 from api_key_manager import api_key_manager
@@ -28,13 +29,12 @@ def _blocking_call_to_gemini(api_key: str, full_contents: str):
     """
     
     if not api_key:
-        print("\nエラー: _blocking_call_to_gemini に有効なAPIキーが渡されませんでした。")
+        print("\nエラー: _blocking_call_to_gemini に有効なAPIキーが渡されませんでした。", file=sys.stderr)
         return None, None
     try:
         client = genai.Client(api_key=api_key)
     except Exception as e:
         print(f"\nエラー: APIクライアントの初期化に失敗しました: {e}", file=sys.stderr)
-        # エラー発生時はNoneを返して異常を伝える
         return None, None
         
     config = types.GenerateContentConfig(
@@ -45,7 +45,7 @@ def _blocking_call_to_gemini(api_key: str, full_contents: str):
         )
     )
 
-    print(f"'{full_contents.splitlines()[0]}' について、AIが思考を開始します...")
+    print(f"'{full_contents.strip().splitlines()[0]}' について、AIが思考を開始します...")
     
     api_call_start_time = time.time() 
     try:
@@ -69,13 +69,11 @@ def _blocking_call_to_gemini(api_key: str, full_contents: str):
         for chunk in stream:
             if not first_chunk_received:
                 first_chunk_received = True
-                #print(f"[{time.time() - api_call_start_time:.2f}s] API呼び出し成功、最初のチャンクを受信しました。")
+                print(f"[{time.time() - api_call_start_time:.2f}s] API呼び出し成功、最初のチャンクを受信しました。")
 
             if not chunk.candidates:
                 continue
 
-            res_json=[]
-            res1=""
             for part in chunk.candidates[0].content.parts:
                 if not hasattr(part, 'text') or not part.text:
                     continue
@@ -85,20 +83,19 @@ def _blocking_call_to_gemini(api_key: str, full_contents: str):
                     if is_first_thought:
                         print("\n[思考プロセス]:")
                         is_first_thought = False
-                    #print(part.text, end="", flush=True)
+                    print(part.text, end="", flush=True)
                 else:
                     answer_text += part.text
                     if is_first_answer:
                         print("\n\n[最終的な回答]:")
                         is_first_answer = False
-                    res = part.text.replace("```json", "").replace("```", "")
-                    #print("[LOG]",json.dumps(res, ensure_ascii=False), end="", flush=True)
+                    res = re.sub(r'```json|```', '', part.text)
                     print(res, end="", flush=True)
+        
         print(f"\n[{time.time() - api_call_start_time:.2f}s] 全ストリーム受信完了。")
         return thinking_text, answer_text
     
     except Exception as e:
-        # ストリーム処理中のエラーも標準エラー出力へ
         print(f"\nストリームの処理中に予期せぬエラーが発生しました: {e}", file=sys.stderr)
         return None, None
 
@@ -127,22 +124,26 @@ async def main():
 
     start_time = time.time()
     
-    # <<< ここからロジックを修正 >>>
     full_contents = ""
+    input_count = 0 # <<< 変更点: 入力件数を保持する変数を追加
 
     if args.prompt_file:
-        # --- --prompt-fileが指定された場合（改善後実行）のルート ---
         try:
             print(f"INFO: プロンプトファイル '{args.prompt_file}' を読み込みます。")
             with open(args.prompt_file, 'r', encoding='utf-8') as f:
-                # ファイルの内容をそのまま最終的なプロンプトとして使用
                 full_contents = f.read()
+            # プロンプトファイルの場合は暫定的に1件としてカウント
+            input_count = 1
         except FileNotFoundError:
             print(f"エラー: プロンプトファイルが見つかりません: {args.prompt_file}", file=sys.stderr)
-            sys.exit(1) # エラーが見つかったら異常終了
+            sys.exit(1)
     else:
-        # --- --prompt-fileが指定されていない場合（初回実行）のルート ---
         print("INFO: デフォルトのプロンプトテンプレートを使用します。")
+        
+        # <<< 変更点: 入力文字列から件数を計算 >>>
+        companies = [c.strip() for c in re.split(r'\s*###\s*|\s*\n\s*', args.query) if c.strip()]
+        input_count = len(companies)
+
         prompt_template="""
 - {company_name}
 
@@ -159,102 +160,21 @@ async def main():
 {{
   "status": "success",
   "count": "処理件数(int)",
-  "data": {{
-    "companyName": "企業の正式名称（string）",
-    "industry": "主要な業種（string）",
-  }}
+  "data": [
+      {{
+        "companyName": "企業の正式名称（string）",
+        "industry": "主要な業種（string）"
+      }}
+  ]
 }}```
 """
-
-        prompt_template2="""
-# 調査対象企業
-- {company_name}
-
-# 上記の企業について、ルールに従い、以下のJSON形式で出力してください。
-
-# ルール
-1.  **メールアドレスの調査方法:** 公式サイトの企業概要、お問合せ、companyinfoなどのページから、<a>タグ、mailto:に含まれていないか調べること。
-2.  **欠損情報の扱い:** 情報が見つからない項目は、`null` としてください。
-3.  **早期打ち切りルール:** 以下の**主要調査項目**のうち、**3つ以上**の情報が見つからなかった（「null」となった）時点で、それ以上の調査を即座に打ち切り、下記の**「調査中断レポート」**を出力してください。
-    *   **主要調査項目:** `officialUrl`, `industry`, `tel`, `fax`, `businessSummary`
-4.  **通常の出力:** 上記ルールに抵触しなかった場合のみ、収集した情報を下記の**「通常調査レポート」**の形式で出力してください。
-
-
-# 出力形式 (JSON)
-### 通常調査レポート
-```json
-{{
-  "status": "success",
-  "data": {{
-    "companyName": "企業の正式名称（string）",
-    "companyStatus": "企業の現在の状況（例：活動中, 閉鎖, 情報なし）（string）",
-    "officialUrl": "公式サイトのURL（string）",
-    "address": "本社の所在地（string）",
-    "industry": "主要な業界（string）",
-    "email": "代表メールアドレス（string）",
-    "tel": "代表電話番号（string）",
-    "fax": "代表FAX番号（string）",
-    "capital": "資本金（string）",
-    "founded": "設立年月（string）",
-    "businessSummary": "事業内容の簡潔な要約（string）",
-    "strengths": "企業の強みや特徴（string）"
-  }}
-}}```
-
-# 調査中断レポート
-```json
-{{
-  "status": "terminated",
-  "error": "Required information could not be found.",
-  "message": "主要調査項目のうち3つ以上が不明だったため、調査を中断しました。",
-  "targetCompany": "{company_name}"
-}}```
-"""
-
-        before="""
-# 実行命令
-上記の指示に厳密に従い、調査を実行し、結果をJSON形式で出力してください。
-
-////
-
-
-以下の企業について、公開情報から徹底的に調査し、結果を下記のJSON形式で厳密に出力してください。
-
-調査対象企業： {company_name}
-
-[出力指示]
-- 必ず指定されたJSON形式に従ってください。
-- 各項目について、可能な限り正確な情報を探してください。
-- Webサイト、会社概要、登記情報などを横断的に確認し、情報の裏付けを取るように努めてください。
-- **企業が閉鎖・移転・倒産しているなど、特記事項がある場合は、「companyStatus」項目にその状況を記載してください。**
-- 調査しても情報が見つからない項目には、「情報なし」と明確に記載してください。
-
-[JSON出力形式]
-```json
-{{
-  "companyName": "企業の正式名称（string）",
-  "companyStatus": "企業の現在の状況（例：活動中, 閉鎖, 情報なし）",
-  "officialUrl": "公式サイトのURL（string）",
-  "address": "本社の所在地（string）",
-  "industry": "主要な業界（string）",
-  "email": "代表メールアドレス（string）",
-  "tel": "代表電話番号（string）",
-  "fax": "代表FAX番号（string）",
-  "capital": "資本金（string）",
-  "founded": "設立年月（string）",
-  "businessSummary": "事業内容の簡潔な要約（string）",
-  "strengths": "企業の強みや特徴（string）"
-}}
-```"""
-        # デフォルトテンプレートに企業名を埋め込む
         full_contents = prompt_template.format(company_name=args.query)
 
     if not full_contents:
         print("エラー: 実行するプロンプトが空です。", file=sys.stderr)
         sys.exit(1)
-    # <<< ここまでロジックを修正 >>>
 
-    print(f"プロンプト: \n{full_contents}")
+    print(f"プロンプト: \n{full_contents[:300]}...")
 
     input_tokens, thinking_tokens, answer_tokens = 0, 0, 0
 
@@ -271,7 +191,6 @@ async def main():
 
     # 2. Geminiへのメイン処理
     main_call_key = await api_key_manager.get_next_key()
-    # メイン処理でキーが取得できない場合は致命的エラーとして終了
     if not main_call_key:
         print("エラー: メイン処理用のAPIキーを取得できませんでした。", file=sys.stderr)
         sys.exit(1)
@@ -282,7 +201,6 @@ async def main():
         _blocking_call_to_gemini, main_call_key, full_contents
     )
 
-    # thinking_text と answer_text がNoneの場合、API呼び出しでエラーが起きている
     if thinking_text is None and answer_text is None:
         print("エラー: Geminiからの応答取得に失敗しました。処理を中断します。", file=sys.stderr)
         sys.exit(1)
@@ -312,7 +230,11 @@ async def main():
 
     print("\n------------------------------")
     end_time = time.time()
+    
+    # <<< 変更点: 最終ログ出力 >>>
     print(f"\n総実行時間: {end_time - start_time:.2f}秒")
+    if input_count > 0:
+        print(f"[ログ] 入力件数: {input_count}") # <= 追加
     print(f"[ログ] 入力トークン数: {input_tokens}")
     print(f"[ログ] 思考トークン数: {thinking_tokens}")
     print(f"[ログ] 回答トークン数: {answer_tokens}")

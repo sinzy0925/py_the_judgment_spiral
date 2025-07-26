@@ -14,6 +14,7 @@ from datetime import datetime # <<< 変更点: datetimeモジュールをイン�
 # google.genaiのインポート
 try:
     from google import genai
+    from google.genai import types
 except ImportError:
     print("エラー: 'google-genai'ライブラリがインストールされていません。")
     print("pip install google-genai を実行してください。")
@@ -38,7 +39,7 @@ def setup_logger(company_name: str):
     # ファイル名に使えない文字を置換
     safe_company_name = re.sub(r'[\\|/|:|*|?|"|<|>|\|]', '_', company_name)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file_name = f"{safe_company_name}_{timestamp}.log"
+    log_file_name = f"{safe_company_name[:50]}_{timestamp}.log"
     log_file_path = os.path.join(log_dir, log_file_name)
 
     # 2. ロガーの取得とレベル設定
@@ -79,30 +80,41 @@ def create_initial_evaluation_prompt(log_output: str, company_name: str) -> str:
     prompt_design_principles = """
 ### 最高のプロンプトを設計するための原理原則（Google AIドキュメントより抜粋）
 
-1.  **明確性と具体性:**
+0.  **早期打ち切りルール:**
+    *   具体的に何という項目が、何件取得できなければ早期打ち切りにするか決めてください。
+    *   早期打ち切りにする場合は、理由がわかるように提示してください。
+
+1.  **簡素なプロンプトを設計する:**
+    *   文字数が多ければ、良いプロンプトになるとは限りません。
+    *   逆に簡素なプロンプトが良い結果を出す場合が多い。
+    *   この前提を踏まえて、プロンプト全体を設計すること。
+    *   AIに自由を残してあげてください。厳格すぎる指示では、AIの自由が奪われます。
+    *   **以下にたくさんの指示事項があるが、参考程度に確認せよ。**
+
+2.  **明確性と具体性:**
     *   曖昧な指示を避け、AIに何をすべきか、どのような形式で出力してほしいかを具体的に指示する。
     *   制約（例：文字数、使用すべきでない言葉）を明確に指定する。
 
-2.  **少数ショットプロンプト（Few-shot Prompting）:**
+3.  **少数ショットプロンプト（Few-shot Prompting）:**
     *   可能であれば、望ましい入出力の「例」を1〜数個示す。モデルは例からパターンを学習し、より正確な結果を生成する。
     *   例の形式（XMLタグ、空白、改行など）は一貫させる。
 
-3.  **コンテキストの追加:**
+4.  **コンテキストの追加:**
     *   AIが必要な情報を持っていると仮定せず、回答を生成するために必要な背景情報やデータをプロンプトに含める。
 
-4.  **役割（ペルソナ）の付与:**
+5.  **役割（ペルソナ）の付与:**
     *   「あなたは専門の〇〇です」のように、AIに特定の役割を与えることで、その役割にふさわしい、より高品質な応答を引き出す。
 
-5.  **構造化と分割:**
+6.  **構造化と分割:**
     *   複雑なタスクは、役割設定、ルール、入力データ、出力形式、最終命令などのコンポーネントに分割してプロンプトを構造化する。
     *   ステップ・バイ・ステップでの実行を指示することで、複雑な推論を安定させる。
 
-6.  **出力形式の制御:**
+7.  **出力形式の制御:**
     *   JSONやマークダウンなど、望ましい出力形式を明確に指定する。
     *   `Output:` のような出力接頭辞を使って、モデルに応答の開始点を教える（完了戦略）。
 
-7.  **追記:**
-    *   メールアドレスは以下の手順で探す。
+8.  **メールアドレスの調査方法:**
+    *   メールアドレスは以下の手順で調査する。
     *   公式サイトがあれば、会社情報、お問合せ、companyinfoなどのページから、<a>タグ、mailto:に含まれていないか調べること。
 """
     
@@ -216,10 +228,18 @@ async def call_gemini(prompt: str) -> dict:
     print(f"  [Gemini Call] API Key (index: {key_info['index']}/{key_info['total']-1}, ends with: ...{key_info['key_snippet']}) を使用します。")
     
     def generate(key_to_use: str):
+        config = types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(
+                thinking_budget=-1,
+                include_thoughts=True
+            )
+        )
+    
         client = genai.Client(api_key=key_to_use)
         response = client.models.generate_content(
             model='gemini-2.5-pro',
-            contents=prompt
+            contents=prompt,
+            config=config
         )
         raw_text = response.text.strip()
         
@@ -282,6 +302,8 @@ async def main():
         initial_eval_prompt = create_initial_evaluation_prompt(initial_log, company_name)
         initial_eval_result = await call_gemini(initial_eval_prompt)
         suggested_prompt = initial_eval_result.get("suggestedPrompt")
+        print(f"log: \n{initial_eval_prompt}")
+        print(f"log: \n{initial_eval_result}")
         print(f"log: \n{suggested_prompt}")
         
         if not suggested_prompt:
@@ -309,6 +331,7 @@ async def main():
         print("\n--- [ステップ5/6] 2回目のログを評価中... ---")
         improved_eval_prompt = create_initial_evaluation_prompt(improved_log, company_name)
         improved_eval_result = await call_gemini(improved_eval_prompt)
+        print(f"log: \n{improved_eval_prompt}")
         print(f"log: \n{improved_eval_result}")
         print("2回目の評価完了。")
 
