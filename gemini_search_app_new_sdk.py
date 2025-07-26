@@ -10,6 +10,7 @@ from google.genai import types
 from dotenv import load_dotenv
 import sys
 import json
+import re
 
 # 作成したAPIキーマネージャーをインポート
 from api_key_manager import api_key_manager
@@ -69,7 +70,7 @@ def _blocking_call_to_gemini(api_key: str, full_contents: str):
         for chunk in stream:
             if not first_chunk_received:
                 first_chunk_received = True
-                #print(f"[{time.time() - api_call_start_time:.2f}s] API呼び出し成功、最初のチャンクを受信しました。")
+                print(f"[{time.time() - api_call_start_time:.2f}s] API呼び出し成功、最初のチャンクを受信しました。")
 
             if not chunk.candidates:
                 continue
@@ -85,7 +86,7 @@ def _blocking_call_to_gemini(api_key: str, full_contents: str):
                     if is_first_thought:
                         print("\n[思考プロセス]:")
                         is_first_thought = False
-                    #print(part.text, end="", flush=True)
+                    print(part.text, end="", flush=True)
                 else:
                     answer_text += part.text
                     if is_first_answer:
@@ -129,6 +130,7 @@ async def main():
     
     # <<< ここからロジックを修正 >>>
     full_contents = ""
+    input_count = 0 # <<< 変更点: 入力件数を保持する変数を追加
 
     if args.prompt_file:
         # --- --prompt-fileが指定された場合（改善後実行）のルート ---
@@ -143,24 +145,35 @@ async def main():
     else:
         # --- --prompt-fileが指定されていない場合（初回実行）のルート ---
         print("INFO: デフォルトのプロンプトテンプレートを使用します。")
+
+        # <<< 変更点: 入力文字列から件数を計算 >>>
+        companies = [c.strip() for c in re.split(r'\s*###\s*|\s*\n\s*', args.query) if c.strip()]
+        input_count = len(companies)
+
         prompt_template="""
 - {company_name}
 
 # 上記の複数の企業について、ルールに従い、以下のJSON形式で出力してください。
 
-# ルール
-### *業種を特定する事のみに専念し、他の事は調べないでください。*
-### *入力された、複数の会社名　住所の情報から、業種を特定してください。*
-### *入力された、会社の件数を数えてください。*
+# 厳守すべきルール
+1. *業種を特定する事のみに専念し、他の事は調べないでください。*
+2. *入力された、複数の会社名　住所の情報から、業種を特定してください。*
+3. *入力された、会社の件数を数えてください。*
+4.  **情報の源泉:** あなたの回答は、**必ずGoogle検索で得られた信頼できる情報源（公式サイト、地図情報）
+    **に基づいていなければなりません。プロンプト内の情報は参考程度とし、鵜呑みにしないでください。
+5.  **ファクトチェックの徹底:** 名称と住所を基に、正しい業種を再検証してください。
+6.  **欠損情報の扱い:** 調査しても情報が見つからない場合は、業種の値を `不明` としてください。
+
 
 # 出力形式 (JSON)
 ### 通常調査レポート
 ```json
 {{
   "status": "success",
-  "count": "処理件数(int)",
+  "count": {{input_count}},
   "data": {{
     "companyName": "企業の正式名称（string）",
+    "address": "本社の所在地（string）"
     "industry": "主要な業種（string）",
   }}
 }}```
