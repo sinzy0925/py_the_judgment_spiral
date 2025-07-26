@@ -1,4 +1,4 @@
-# advanced_evaluation_runner_log.py (JSON抽出ロジックを強化)
+# advanced_evaluation_runner_log.py (ロギング機能追加版)
 
 import sys
 import json
@@ -8,6 +8,8 @@ import tempfile
 from dotenv import load_dotenv
 import asyncio
 import subprocess
+import logging # <<< 変更点: loggingモジュールをインポート
+from datetime import datetime # <<< 変更点: datetimeモジュールをインポート
 
 # google.genaiのインポート
 try:
@@ -23,7 +25,54 @@ from api_key_manager import api_key_manager
 # .envファイルから環境変数を読み込む
 load_dotenv()
 
+# --- Logger Setup ---
+# <<< 変更点: ロガー設定のセクションを丸ごと追加 >>>
+def setup_logger(company_name: str):
+    """
+    コンソールとファイルの両方に出力するロガーを設定する。
+    """
+    # 1. ログファイル名の生成
+    log_dir = "log"
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # ファイル名に使えない文字を置換
+    safe_company_name = re.sub(r'[\\|/|:|*|?|"|<|>|\|]', '_', company_name)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file_name = f"{safe_company_name}_{timestamp}.log"
+    log_file_path = os.path.join(log_dir, log_file_name)
+
+    # 2. ロガーの取得とレベル設定
+    #    logging.getLogger() に名前を渡さないことで、ルートロガーを取得
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    # 3. 既存のハンドラをクリア (重複設定を防ぐため)
+    if logger.hasHandlers():
+        logger.handlers.clear()
+
+    # 4. フォーマッターの作成
+    #    ログメッセージのみを出力するシンプルなフォーマット
+    formatter = logging.Formatter('%(message)s')
+
+    # 5. コンソールハンドラの作成と設定
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    # 6. ファイルハンドラの作成と設定
+    file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    # 7. print関数をロガーのinfoメソッドで上書き（モンキーパッチ）
+    #    これにより、既存のprint文はすべてロガー経由で出力されるようになる
+    builtins = __import__('builtins')
+    builtins.print = logger.info
+    
+    print(f"--- ログ出力開始: {log_file_path} ---")
+
 # --- PROMPT DEFINITIONS ---
+# (以降のプロンプト定義やヘルパー関数は変更なし)
 def create_initial_evaluation_prompt(log_output: str, company_name: str) -> str:
     """初回評価と、改善版プロンプトの生成をAIに依頼するプロンプト"""
     return f"""
@@ -94,10 +143,7 @@ json```{{
 }}```
 """
 
-# --- HELPER FUNCTIONS (Async) ---
-
 async def run_search_app(company_name: str, prompt_file: str = None) -> str:
-    # (この関数は変更なし)
     target_script = "gemini_search_app_new_sdk.py"
     command = [sys.executable, target_script, company_name]
     if prompt_file:
@@ -114,6 +160,12 @@ async def run_search_app(company_name: str, prompt_file: str = None) -> str:
     )
     stdout, stderr = await process.communicate()
 
+    # サブプロセスの標準エラー出力もログに記録する
+    if stderr:
+        print("\n--- サブプロセスのエラー出力 ---")
+        print(stderr.decode('utf-8', 'replace').strip())
+        print("------------------------------\n")
+        
     if process.returncode != 0:
         raise subprocess.CalledProcessError(
             process.returncode, command,
@@ -123,12 +175,7 @@ async def run_search_app(company_name: str, prompt_file: str = None) -> str:
 
     return stdout.decode('utf-8', 'replace')
 
-# <<< 変更点: call_gemini関数のJSON抽出ロジックを強化
 async def call_gemini(prompt: str) -> dict:
-    """
-    ApiKeyManagerからキーを取得し、そのキーを使ってGeminiを非同期で呼び出し、
-    レスポンスからJSONを堅牢に抽出してパースして返す。
-    """
     api_key = await api_key_manager.get_next_key()
     if not api_key:
         raise ValueError("APIキーを取得できませんでした。ApiKeyManagerの設定を確認してください。")
@@ -144,21 +191,16 @@ async def call_gemini(prompt: str) -> dict:
         )
         raw_text = response.text.strip()
         
-        # --- ここから堅牢なJSON抽出ロジック ---
         json_string = None
-        
-        # 試行1: ```json ... ``` ブロックを正規表現で探す
         match = re.search(r'```json\s*(\{.*?\})\s*```', raw_text, re.DOTALL)
         if match:
             json_string = match.group(1)
         else:
-            # 試行2: ```がない場合、最初と最後の波括弧で囲まれた部分を探す
             start_index = raw_text.find('{')
             end_index = raw_text.rfind('}')
             if start_index != -1 and end_index != -1 and start_index < end_index:
                 json_string = raw_text[start_index : end_index + 1]
 
-        # 抽出した文字列をパースする
         if json_string:
             try:
                 return json.loads(json_string)
@@ -169,30 +211,34 @@ async def call_gemini(prompt: str) -> dict:
                 print("--- AIからの生のレスポンス全体 ---")
                 print(raw_text)
                 print("------------------------------\n")
-                raise  # エラーを再送出して処理を中断
+                raise
         else:
-            # JSONを全く抽出できなかった場合
             print("\n--- JSON抽出エラー ---")
             print("AIのレスポンスからJSONオブジェクトを抽出できませんでした。")
             print("--- AIからの生のレスポンス全体 ---")
             print(raw_text)
             print("------------------------------\n")
             raise ValueError("AI response did not contain a valid JSON object.")
-        # --- ここまで ---
 
     return await asyncio.to_thread(generate, api_key)
 
 
 # --- MAIN LOGIC (Async) ---
-# (main関数は変更なし)
 async def main():
     if len(sys.argv) < 2:
-        print("使い方: python advanced_evaluation_runner.py <評価したい企業名>")
+        # ロガー設定前なので、オリジナルのprintで出力
+        original_print = __import__('builtins').print
+        original_print("使い方: python advanced_evaluation_runner.py <評価したい企業名>")
         sys.exit(1)
+        
     company_name = " ".join(sys.argv[1:])
+    
+    # <<< 変更点: main関数の最初にロガーを設定
+    setup_logger(company_name)
 
     temp_prompt_file = None
     try:
+        # (以降のtryブロック内は変更なし)
         # 1. 初回実行
         print("--- [ステップ1/6] 初回実行中... ---")
         initial_log = await run_search_app(company_name)
@@ -248,19 +294,26 @@ async def main():
 
     except subprocess.CalledProcessError as e:
         print(f"\nエラー: スクリプト '{e.cmd[1]}' の実行に失敗しました。")
-        print("STDOUT:", e.stdout)
-        print("STDERR:", e.stderr)
+        # CalledProcessErrorにはstdout, stderrが属性として含まれているので、それらを出力
+        if e.stdout:
+            print("--- STDOUT ---")
+            print(e.stdout)
+        if e.stderr:
+            print("--- STDERR ---")
+            print(e.stderr)
+            
     except Exception as e:
         import traceback
         print(f"\nエラー: 予期せぬエラーが発生しました。: {e}")
+        # traceback.print_exc() はファイルにも出力される
         traceback.print_exc()
+        
     finally:
-        # 正常終了時も、エラー発生時も、必ず最後にセッションを保存する
+        # (finallyブロックは変更なし)
         print("\n[ApiKeyManager] セッション情報を保存しています...")
         api_key_manager.save_session()
         print("[ApiKeyManager] セッション情報を保存しました。")
         
-        # 一時ファイルをクリーンアップ
         if temp_prompt_file and os.path.exists(temp_prompt_file):
             os.remove(temp_prompt_file)
             print(f"\n一時ファイル '{os.path.basename(temp_prompt_file)}' を削除しました。")
