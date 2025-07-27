@@ -73,6 +73,8 @@ pip install -r requirements.txt
 ### 3. 環境変数の設定
 
 プロジェクトのルートディレクトリに`.env`ファイルを作成し、お持ちのGoogle APIキーを設定します。キーは複数設定することができ、プログラムが自動でローテーションして使用します。
+Google APIキーの取得は、こちらにアクセスしてください。（無料で取得できます。）
+https://aistudio.google.com/apikey
 
 **`.env` ファイルの例:**
 
@@ -95,17 +97,17 @@ GOOGLE_API_KEY_2="AIzaSy...your...third...key"
 メインスクリプトである`advanced_evaluation_runner_log.py`を実行します。引数として、調査したい企業名を渡してください。
 
 ```bash
-python advanced_evaluation_runner_log.py "調査したい企業名"
+python advanced_evaluation_runner_log.py "調査したい企業名　住所"
 ```
 
 **実行例:**
 ```bash
-python advanced_evaluation_runner_log.py "グーグル合同会社"
+python advanced_evaluation_runner_log.py "グーグル合同会社　住所"
 ```
 
-### ファイルを使った一括テスト
+### ファイルにテスト用データがあります。
 
-プロジェクトには、テスト用の企業データが100件記述された`input_data_sample.txt`が用意されています。このファイルを使って、一括でテストを実行できます。
+プロジェクトには、テスト用の企業データが100件記述された`input_data_sample.txt`が用意されています。このファイルを使って、テストを実行できます。
 
 **`input_data_sample.txt` の形式:**
 企業情報は`###`または改行で区切られています。
@@ -116,14 +118,6 @@ python advanced_evaluation_runner_log.py "グーグル合同会社"
 ...
 ```
 
-**実行コマンド:**
-以下のコマンドは、`input_data_sample.txt`の全内容を読み込み、スクリプトの引数として渡します。
-
-```bash
-# macOS / Linux の場合
-python advanced_evaluation_runner_log.py "$(< input_data_sample.txt)"
-```
-> **Note:** WindowsのコマンドプロンプトやPowerShellでは上記コマンドは動作しない場合があります。その場合は、ファイル内容を手動でコピー＆ペーストして引数として渡してください。
 
 ## 実行プロセス
 
