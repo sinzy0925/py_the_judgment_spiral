@@ -6,6 +6,10 @@
 
 良いプロンプト開発にありがちな「属人化」「時間コスト」「評価基準の曖昧さ」といった課題を、**「実行→評価→改善→再実行→比較」**というサイクルを自動化することで解決します。
 
+### イメージ
+パワポ
+https://1drv.ms/p/c/135b66d476409d97/EZsra7MFu3FAolo4vOuwvMkB7rZSty9P--oLLV-mjV10wg?e=uKYQAu
+
 ### 主要な構成要素
 
 1.  **評価・改善司令塔 (`advanced_evaluation_runner_log.py`)**
