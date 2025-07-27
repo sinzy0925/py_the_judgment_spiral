@@ -138,4 +138,4 @@ python advanced_evaluation_runner_log.py "グーグル合同会社　住所"
 
 ## ライセンス
 
-このプロジェクトは[MITライセンス](LICENSE)の下で公開されています。
+このプロジェクトは[MITライセンス](LICENSE.md)の下で公開されています。
