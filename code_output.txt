@@ -1,0 +1,4432 @@
+
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: .session_data.json
+- 内容:
+{"lastKeyIndex": 8}
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: advanced_evaluation_runner_log.py
+- 内容:
+# advanced_evaluation_runner_log.py (ロギング機能追加版)
+
+import sys
+import json
+import re
+import os
+import tempfile
+from dotenv import load_dotenv
+import asyncio
+import subprocess
+import logging # <<< 変更点: loggingモジュールをインポート
+from datetime import datetime # <<< 変更点: datetimeモジュールをインポート
+
+# google.genaiのインポート
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    print("エラー: 'google-genai'ライブラリがインストールされていません。")
+    print("pip install google-genai を実行してください。")
+    sys.exit(1)
+
+# ApiKeyManagerのシングルトンインスタンスをインポート
+from api_key_manager import api_key_manager
+
+# .envファイルから環境変数を読み込む
+load_dotenv()
+
+# --- Logger Setup ---
+# <<< 変更点: ロガー設定のセクションを丸ごと追加 >>>
+def setup_logger(company_name: str):
+    """
+    コンソールとファイルの両方に出力するロガーを設定する。
+    """
+    # 1. ログファイル名の生成
+    log_dir = "log"
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # ファイル名に使えない文字を置換
+    safe_company_name = re.sub(r'[\\|/|:|*|?|"|<|>|\|]', '_', company_name)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file_name = f"{safe_company_name[:50]}_{timestamp}.log"
+    log_file_path = os.path.join(log_dir, log_file_name)
+
+    # 2. ロガーの取得とレベル設定
+    #    logging.getLogger() に名前を渡さないことで、ルートロガーを取得
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    # 3. 既存のハンドラをクリア (重複設定を防ぐため)
+    if logger.hasHandlers():
+        logger.handlers.clear()
+
+    # 4. フォーマッターの作成
+    #    ログメッセージのみを出力するシンプルなフォーマット
+    formatter = logging.Formatter('%(message)s')
+
+    # 5. コンソールハンドラの作成と設定
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    # 6. ファイルハンドラの作成と設定
+    file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    # 7. print関数をロガーのinfoメソッドで上書き（モンキーパッチ）
+    #    これにより、既存のprint文はすべてロガー経由で出力されるようになる
+    builtins = __import__('builtins')
+    builtins.print = logger.info
+    
+    print(f"--- ログ出力開始: {log_file_path} ---")
+
+# --- PROMPT DEFINITIONS ---
+def create_initial_evaluation_prompt(log_output: str, company_name: str) -> str:
+    """初回評価と、改善版プロンプトの生成をAIに依頼するプロンプト"""
+    
+    # ドキュメントの要点をプロンプト内に埋め込む
+    prompt_design_principles = """
+### 最高のプロンプトを設計するための原理原則（Google AIドキュメントより抜粋）
+
+0.  **早期打ち切りルール:**
+    *   具体的に何という項目が、何件取得できなければ早期打ち切りにするか決めてください。
+    *   早期打ち切りにする場合は、理由がわかるように提示してください。
+    *   一度調べて、分からなければその時点で、「不明」と答えて良い。
+
+1.  **簡素なプロンプトを設計する:**
+    *   文字数が多ければ、良いプロンプトになるとは限りません。
+    *   逆に簡素なプロンプトが良い結果を出す場合が多い。
+    *   この前提を踏まえて、プロンプト全体を設計すること。
+    *   AIに自由を残してあげてください。厳格すぎる指示では、AIの自由が奪われます。
+    *   **以下にたくさんの指示事項があるが、参考程度に確認せよ。**
+
+2.  **推測の絶対的禁止:**
+    *   具体的な検索結果に基づく情報のみ提供すること。
+    *   ファクトチェックして、推測がないか調査すること。
+
+3.  **明確性と具体性:**
+    *   曖昧な指示を避け、AIに何をすべきか、どのような形式で出力してほしいかを具体的に指示する。
+    *   制約（例：文字数、使用すべきでない言葉）を明確に指定する。
+
+4.  **少数ショットプロンプト（Few-shot Prompting）:**
+    *   可能であれば、望ましい入出力の「例」を1〜数個示す。モデルは例からパターンを学習し、より正確な結果を生成する。
+    *   例の形式（XMLタグ、空白、改行など）は一貫させる。
+
+5.  **コンテキストの追加:**
+    *   AIが必要な情報を持っていると仮定せず、回答を生成するために必要な背景情報やデータをプロンプトに含める。
+
+6.  **役割（ペルソナ）の付与:**
+    *   「あなたは専門の〇〇です」のように、AIに特定の役割を与えることで、その役割にふさわしい、より高品質な応答を引き出す。
+
+7.  **構造化と分割:**
+    *   複雑なタスクは、役割設定、ルール、入力データ、出力形式、最終命令などのコンポーネントに分割してプロンプトを構造化する。
+    *   ステップ・バイ・ステップでの実行を指示することで、複雑な推論を安定させる。
+
+8.  **出力形式の制御:**
+    *   JSONやマークダウンなど、望ましい出力形式を明確に指定する。
+    *   `Output:` のような出力接頭辞を使って、モデルに応答の開始点を教える（完了戦略）。
+
+9.  **メールアドレスの調査方法:**
+    *   メールアドレスは以下の手順で調査する。
+    *   公式サイトがあれば、会社情報、お問合せ、companyinfoなどのページから、<a>タグ、mailto:に含まれていないか調べること。
+"""
+    
+    return f"""
+あなたは、AIのパフォーマンスを多角的に分析し、改善策を提案する、世界トップクラスのプロンプトエンジニアです。
+あなたは、以下の【最高のプロンプトを設計するための原理原則】を深く理解しています。
+
+{prompt_design_principles}
+
+---
+### あなたの任務
+以下の【評価対象の実行ログ】を慎重に分析し、【出力必須のJSONスキーマ】に従って「評価レポート」と「改善版プロンプト」を作成してください。
+
+### 改善版プロンプト作成時の最重要ルール
+- 上記の【原理原則】を最大限に活用し、ログで明らかになった課題を解決するための、より洗練されたプロンプトを生成してください。
+- 生成するプロンプトは、それ自体が**単独で実行可能な命令セット**でなければなりません。
+- 調査対象の企業名として、必ず「{company_name}」という具体的な文字列をプロンプト内に直接埋め込んでください。プレースホルダーは絶対に使用しないでください。
+- プロンプトの最後には、AIが実行すべき具体的な命令文を必ず含めてください。
+
+--- 評価対象の実行ログ ---
+{log_output}
+--- ここまで ---
+
+--- 出力必須のJSONスキーマ ---
+```json
+{{
+  "evaluationResult": {{
+    "targetCompany": "ログから抽出した調査対象企業名",
+    "overallScore": "100点満点での総合評価",
+    "overallSummary": "評価全体の総括コメント",
+    "detailedCriteria": [
+      {{"criterion": "プロンプト指示への忠実性", "score": "25/25", "analysis": "..."}},
+      {{"criterion": "情報の正確性（ファクトチェック）", "score": "25/25", "analysis": "..."}},
+      {{"criterion": "高度な推論・分析能力", "score": "25/25", "analysis": "..."}},
+      {{"criterion": "網羅性と例外処理", "score": "25/25", "analysis": "..."}}
+    ]
+  }},
+  "performanceMetrics": {{
+    "executionTimeSeconds": "ログから抽出した総実行時間（float）",
+    "tokens": {{"input": "int", "output": "int", "total": "int"}},
+    "analysis": "速度とコストの観点からのパフォーマンス分析"
+  }},
+  "suggestedPrompt": "（ここに、あなたが生成した改善版の完全なプロンプト文字列を記述してください。プレースホルダーは含めないでください。）"
+}}```
+"""
+
+def create_comparison_prompt(eval1_json: str, eval2_json: str) -> str:
+    """2つの評価結果を比較し、最終判定を下すためのプロンプト"""
+    return f"""
+あなたは、A/Bテストの結果を分析する専門のアナリストです。
+以下の2つのAI実行評価レポート（初回実行と、プロンプト改善後の実行）を比較し、プロンプトの改善が有効だったかどうかを最終判定してください。
+--- レポート1: 初回実行の評価 ---
+{eval1_json}
+--- ここまで ---
+--- レポート2: プロンプト改善後の実行評価 ---
+{eval2_json}
+--- ここまで ---
+--- 出力必須のJSONスキーマ ---
+json```{{
+  "comparisonSummary": {{
+    "initialScore": "レポート1の総合スコア",
+    "improvedScore": "レポート2の総合スコア",
+    "performanceChange": {{
+      "executionTime": "実行時間の変化（例: -2.5s）",
+      "totalTokens": "総トークン数の変化（例: +50 tokens）"
+    }},
+    "qualityChange": "回答の品質（正確性、推論など）がどのように変化したかの具体的な分析",
+    "finalVerdict": "プロンプトの改善は有効だったか、その理由は何か、という最終結論"
+  }}
+}}```
+"""
+
+async def run_search_app(company_name: str, prompt_file: str = None) -> str:
+    target_script = "gemini_search_app_new_sdk.py"
+    command = [sys.executable, target_script, company_name]
+    if prompt_file:
+        command.extend(["--prompt-file", prompt_file])
+
+    process_env = os.environ.copy()
+    process_env["PYTHONIOENCODING"] = "utf-8"
+
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=process_env
+    )
+    stdout, stderr = await process.communicate()
+
+    # サブプロセスの標準エラー出力もログに記録する
+    if stderr:
+        print("\n--- サブプロセスのエラー出力 ---")
+        print(stderr.decode('utf-8', 'replace').strip())
+        print("------------------------------\n")
+        
+    if process.returncode != 0:
+        raise subprocess.CalledProcessError(
+            process.returncode, command,
+            stdout.decode('utf-8', 'replace'),
+            stderr.decode('utf-8', 'replace')
+        )
+
+    return stdout.decode('utf-8', 'replace')
+
+async def call_gemini(prompt: str) -> dict:
+    api_key = await api_key_manager.get_next_key()
+    if not api_key:
+        raise ValueError("APIキーを取得できませんでした。ApiKeyManagerの設定を確認してください。")
+
+    key_info = api_key_manager.last_used_key_info
+    print(f"  [Gemini Call] API Key (index: {key_info['index']}/{key_info['total']-1}, ends with: ...{key_info['key_snippet']}) を使用します。")
+    
+    def generate(key_to_use: str):
+        config = types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(
+                thinking_budget=-1,
+                include_thoughts=True
+            )
+        )
+    
+        client = genai.Client(api_key=key_to_use)
+        response = client.models.generate_content(
+            model='gemini-2.5-pro',
+            contents=prompt,
+            config=config
+        )
+        raw_text = response.text.strip()
+        
+        json_string = None
+        match = re.search(r'```json\s*(\{.*?\})\s*```', raw_text, re.DOTALL)
+        if match:
+            json_string = match.group(1)
+        else:
+            start_index = raw_text.find('{')
+            end_index = raw_text.rfind('}')
+            if start_index != -1 and end_index != -1 and start_index < end_index:
+                json_string = raw_text[start_index : end_index + 1]
+
+        if json_string:
+            try:
+                return json.loads(json_string)
+            except json.JSONDecodeError as e:
+                print("\n--- JSONパースエラー ---")
+                print(f"エラー詳細: {e}")
+                print("パースに失敗した抽出済み文字列:", json_string)
+                print("--- AIからの生のレスポンス全体 ---")
+                print(raw_text)
+                print("------------------------------\n")
+                raise
+        else:
+            print("\n--- JSON抽出エラー ---")
+            print("AIのレスポンスからJSONオブジェクトを抽出できませんでした。")
+            print("--- AIからの生のレスポンス全体 ---")
+            print(raw_text)
+            print("------------------------------\n")
+            raise ValueError("AI response did not contain a valid JSON object.")
+
+    return await asyncio.to_thread(generate, api_key)
+
+
+# --- MAIN LOGIC (Async) ---
+async def main():
+    if len(sys.argv) < 2:
+        # ロガー設定前なので、オリジナルのprintで出力
+        original_print = __import__('builtins').print
+        original_print("使い方: python advanced_evaluation_runner.py <評価したい企業名>")
+        sys.exit(1)
+        
+    company_name = " ".join(sys.argv[1:])
+    
+    # <<< 変更点: main関数の最初にロガーを設定
+    setup_logger(company_name)
+
+    temp_prompt_file = None
+    try:
+        # (以降のtryブロック内は変更なし)
+        # 1. 初回実行
+        print("--- [ステップ1/6] 初回実行中... ---")
+        initial_log = await run_search_app(company_name)
+        print(f"log: \n{initial_log}")
+        print("初回実行完了。")
+
+        # 2. 初回評価＆改善案プロンプト生成
+        print("\n--- [ステップ2/6] 初回ログを評価し、改善版プロンプトを生成中... ---")
+        initial_eval_prompt = create_initial_evaluation_prompt(initial_log, company_name)
+        initial_eval_result = await call_gemini(initial_eval_prompt)
+        suggested_prompt = initial_eval_result.get("suggestedPrompt")
+        print(f"log: \n{initial_eval_prompt}")
+        print(f"log: \n{initial_eval_result}")
+        print(f"log: \n{suggested_prompt}")
+        
+        if not suggested_prompt:
+            print("エラー: 改善版プロンプトの生成に失敗しました。処理を中断します。")
+            print("AIからのレスポンス:", json.dumps(initial_eval_result, indent=2, ensure_ascii=False))
+            return
+
+        print("改善版プロンプトの生成完了。")
+
+        # 3. 改善版プロンプトを一時ファイルに保存
+        print(f"\n--- [ステップ3/6] 改善版プロンプトを一時ファイルに保存します ---")
+        with tempfile.NamedTemporaryFile(mode='w+', delete=False, encoding='utf-8', suffix=".txt") as tf:
+            temp_prompt_file = tf.name
+            tf.write(suggested_prompt)
+        
+        print(f"改善版プロンプトを '{os.path.basename(temp_prompt_file)}' に保存しました。")
+
+        # 4. 改善後プロンプトで再実行
+        print("\n--- [ステップ4/6] 改善版プロンプトで再実行中... ---")
+        improved_log = await run_search_app(company_name, prompt_file=temp_prompt_file)
+        print(f"log: \n{improved_log}")
+        print("再実行完了。")
+
+        # 5. 2回目の評価
+        print("\n--- [ステップ5/6] 2回目のログを評価中... ---")
+        improved_eval_prompt = create_initial_evaluation_prompt(improved_log, company_name)
+        improved_eval_result = await call_gemini(improved_eval_prompt)
+        print(f"log: \n{improved_eval_prompt}")
+        print(f"log: \n{improved_eval_result}")
+        print("2回目の評価完了。")
+
+        # 6. 最終比較
+        print("\n--- [ステップ6/6] 最終比較レポートを生成中... ---")
+        comparison_prompt = create_comparison_prompt(
+            json.dumps(initial_eval_result),
+            json.dumps(improved_eval_result)
+        )
+        final_report = await call_gemini(comparison_prompt)
+        
+        print("\n\n" + "="*20 + " 最終比較分析レポート " + "="*20)
+        print(json.dumps(final_report, indent=2, ensure_ascii=False))
+        print("="*64)
+
+    except subprocess.CalledProcessError as e:
+        print(f"\nエラー: スクリプト '{e.cmd[1]}' の実行に失敗しました。")
+        # CalledProcessErrorにはstdout, stderrが属性として含まれているので、それらを出力
+        if e.stdout:
+            print("--- STDOUT ---")
+            print(e.stdout)
+        if e.stderr:
+            print("--- STDERR ---")
+            print(e.stderr)
+            
+    except Exception as e:
+        import traceback
+        print(f"\nエラー: 予期せぬエラーが発生しました。: {e}")
+        # traceback.print_exc() はファイルにも出力される
+        traceback.print_exc()
+        
+    finally:
+        # (finallyブロックは変更なし)
+        print("\n[ApiKeyManager] セッション情報を保存しています...")
+        api_key_manager.save_session()
+        print("[ApiKeyManager] セッション情報を保存しました。")
+        
+        if temp_prompt_file and os.path.exists(temp_prompt_file):
+            os.remove(temp_prompt_file)
+            print(f"\n一時ファイル '{os.path.basename(temp_prompt_file)}' を削除しました。")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: api_key_manager.py
+- 内容:
+# api_key_manager.py
+import os
+import json
+import asyncio
+from dotenv import load_dotenv
+
+# .envファイルから環境変数を読み込む
+load_dotenv()
+
+# セッションファイル（最後に使ったキーのインデックスを保存する場所）
+SESSION_FILE = os.path.join(os.getcwd(), '.session_data.json')
+
+class ApiKeyManager:
+    """
+    複数のAPIキーを管理し、安全なローテーション、セッションの永続化、
+    および高負荷な並列処理下でのレースコンディションを回避するシステム。
+    """
+    _instance = None
+
+    # シングルトンパターンを適用し、アプリケーション全体で唯一のインスタンスを保証
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(ApiKeyManager, cls).__new__(cls)
+        return cls._instance
+
+    def __init__(self):
+        # __init__が複数回呼ばれることを防ぐためのフラグ
+        if hasattr(self, '_initialized'):
+            return
+        self._initialized = True
+
+        self._api_keys: list[str] = []
+        self._current_index: int = -1
+        self._last_access_time: float = 0.0
+        # APIコール間のクールダウン時間（秒）。レート制限に対する安全マージン。
+        self._COOLDOWN_SECONDS = 1.0  # 1秒のクールダウン
+
+        # キー選択処理をアトミック（不可分）にするためのロック
+        self._key_selection_lock = asyncio.Lock()
+        
+        self._load_api_keys_from_env()
+        self._load_session()
+        
+        print(f"[{self.__class__.__name__}] 初期化完了。{len(self._api_keys)}個のキーをロードしました。")
+
+    def _load_api_keys_from_env(self):
+        """ .envファイルから全てのAPIキーを読み込む """
+        keys = set() # 重複を自動的に排除するためにセットを使用
+        
+        # GOOGLE_API_KEY も読み込む
+        base_key = os.getenv('GOOGLE_API_KEY')
+        if base_key:
+            keys.add(base_key)
+        
+        # GOOGLE_API_KEY_1, _2, ... を読み込む
+        i = 1
+        while True:
+            key = os.getenv(f'GOOGLE_API_KEY_{i}')
+            if key:
+                keys.add(key)
+                i += 1
+            else:
+                break
+        
+        self._api_keys = list(keys)
+        if not self._api_keys:
+            print("警告: 有効なAPIキーが.envファイルに設定されていません。")
+
+    def _load_session(self):
+        """ セッションファイルから、最後に使ったキーのインデックスを読み込む """
+        try:
+            if os.path.exists(SESSION_FILE):
+                with open(SESSION_FILE, 'r') as f:
+                    data = json.load(f)
+                    last_index = data.get('lastKeyIndex', -1)
+                    # 読み込んだインデックスが現在のキーリストの範囲内か確認
+                    if 0 <= last_index < len(self._api_keys):
+                        self._current_index = last_index
+                        print(f"[{self.__class__.__name__}] セッションをロードしました。次のキーインデックスは { (last_index + 1) % len(self._api_keys) } から開始します。")
+                    else:
+                        self._current_index = -1
+
+        except (IOError, json.JSONDecodeError) as e:
+            print(f"セッションファイルの読み込み中にエラーが発生しました: {e}")
+            self._current_index = -1
+
+    def save_session(self):
+        """ 最後に使ったキーのインデックスをセッションファイルに保存する """
+        # 保存すべきキーがない場合は何もしない
+        if not self._api_keys:
+            return
+            
+        try:
+            with open(SESSION_FILE, 'w') as f:
+                json.dump({'lastKeyIndex': self._current_index}, f)
+        except IOError as e:
+            print(f"セッションファイルの保存に失敗しました: {e}")
+
+    async def get_next_key(self) -> str | None:
+        """
+        次の利用可能なAPIキーを、安全な排他制御とクールダウン付きで取得する。
+        """
+        if not self._api_keys:
+            print("エラー: 利用可能なAPIキーがありません。")
+            return None
+
+        # asyncio.Lockを使い、キーの選択とインデックス更新処理が同時に実行されないようにする
+        async with self._key_selection_lock:
+            # 前回の呼び出しからクールダウン時間内に再度呼び出された場合、待機する
+            # ループの初回実行時などを考慮し、self._last_access_timeが0より大きい場合のみチェック
+            if self._last_access_time > 0:
+                now = asyncio.get_event_loop().time()
+                elapsed_time = now - self._last_access_time
+                if elapsed_time < self._COOLDOWN_SECONDS:
+                    wait_time = self._COOLDOWN_SECONDS - elapsed_time
+                    await asyncio.sleep(wait_time)
+            
+            # ラウンドロビン方式で次のインデックスを計算
+            self._current_index = (self._current_index + 1) % len(self._api_keys)
+            # キーを払い出した時刻を更新
+            self._last_access_time = asyncio.get_event_loop().time()
+            
+            return self._api_keys[self._current_index]
+
+    @property
+    def last_used_key_info(self) -> dict:
+        """
+        最後に払い出されたキーに関する情報を返す読み取り専用プロパティ。
+        デバッグやロギング目的で使用する。
+        """
+        if self._current_index == -1 or not self._api_keys:
+            return {
+                "key_snippet": "N/A",
+                "index": -1,
+                "total": len(self._api_keys)
+            }
+        
+        key = self._api_keys[self._current_index]
+        return {
+            "key_snippet": key[-4:], # 最後の4文字
+            "index": self._current_index,
+            "total": len(self._api_keys)
+        }
+
+# シングルトンインスタンスとしてエクスポート（プログラム全体で一つのインスタンスを共有する）
+api_key_manager = ApiKeyManager()
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: api_key_session.json
+- 内容:
+{"current_index": 11}
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: evaluation_runner.py
+- 内容:
+import sys
+import subprocess
+import json
+from google import genai
+import re
+import os
+
+# Gemini APIキーを環境変数から設定
+# genai.configure(api_key="YOUR_GEMINI_API_KEY")
+
+def create_evaluation_prompt(log_output: str) -> str:
+    """
+    キャプチャしたログを元に、AI評価用のプロンプトを生成する関数。
+    """
+    # (この関数の内容は変更ありません)
+    return f"""
+あなたは、AIのパフォーマンスを多角的に分析する専門の評価者です。
+以下の実行ログを慎重に分析し、提供されたJSONスキーマに従って評価レポートを作成してください。
+
+評価のポイント：
+1.  **品質評価**: 情報の正確性、推論の妥当性、指示への忠実性を評価します。
+2.  **性能評価**: 実行時間とトークン数から、コストパフォーマンスを評価します。
+3.  **プロンプト改善提案**: ログの内容に基づき、元のプロンプトをさらに改善するための具体的で建設的な提案をしてください。もし改善の必要がなければ、その理由を述べてください。
+
+--- 評価対象の実行ログ ---
+{log_output}
+--- ここまで ---
+
+--- 出力必須のJSONスキーマ ---
+```json
+{{
+  "evaluationResult": {{
+    "targetCompany": "ログから抽出した調査対象企業名",
+    "overallScore": "100点満点での総合評価",
+    "overallSummary": "評価全体の総括コメント",
+    "detailedCriteria": [
+      {{
+        "criterion": "プロンプト指示への忠実性",
+        "score": "25/25",
+        "analysis": "JSON形式の遵守、全項目の網羅性などに関する分析"
+      }},
+      {{
+        "criterion": "情報の正確性（ファクトチェック）",
+        "score": "25/25",
+        "analysis": "抽出された情報の事実との整合性に関する分析"
+      }},
+      {{
+        "criterion": "高度な推論・分析能力",
+        "score": "25/25",
+        "analysis": "情報の矛盾の発見、状況の推論など、表面的な検索を超えた能力の分析"
+      }},
+      {{
+        "criterion": "網羅性と例外処理",
+        "score": "25/25",
+        "analysis": "要求された全項目への回答と、情報がない場合の処理に関する分析"
+      }}
+    ]
+  }},
+  "performanceMetrics": {{
+    "executionTimeSeconds": "ログから抽出した総実行時間（float）",
+    "tokens": {{
+      "input": "ログから抽出した入力トークン数（int）",
+      "output": "ログから抽出した合計出力トークン数（int）",
+      "total": "ログから抽出した総計トークン数（int）"
+    }},
+    "analysis": "速度とコストの観点からのパフォーマンス分析"
+  }},
+  "promptImprovementSuggestions": "ログの分析に基づいた、元のプロンプトに対する具体的で建設的な改善提案。改善不要の場合はその旨を記述。"
+}}
+```
+"""
+
+def main():
+    if len(sys.argv) < 2:
+        print("使い方: python evaluation_runner.py <評価したい企業名>")
+        sys.exit(1)
+    company_name = " ".join(sys.argv[1:])
+
+    target_script = "gemini_search_app_new_sdk.py"
+
+    print(f"--- '{target_script}' を実行してログを収集中... ---")
+    try:
+        # ===== ここからが修正箇所 =====
+        # 実行する子プロセスの環境変数を設定
+        process_env = os.environ.copy()
+        # Pythonの標準入出力のエンコーディングをUTF-8に強制する
+        process_env["PYTHONIOENCODING"] = "utf-8"
+
+        result = subprocess.run(
+            [sys.executable, target_script, company_name],
+            capture_output=True,
+            text=True,
+            check=True,
+            # 子プロセスがUTF-8で出力するので、こちらもUTF-8で受け取る
+            encoding='utf-8',
+            # 万が一、それでもデコードできない文字があった場合にエラーを回避する
+            errors='replace',
+            env=process_env
+        )
+        # ===== ここまでが修正箇所 =====
+
+        log_output = result.stdout
+        print(f"--- ログ収集完了 ---")
+
+    except subprocess.CalledProcessError as e:
+        print(f"エラー: '{target_script}' の実行に失敗しました。")
+        print("STDOUT:", e.stdout)
+        print("STDERR:", e.stderr)
+        sys.exit(1)
+    except FileNotFoundError:
+        print(f"エラー: '{target_script}' が見つかりません。同じディレクトリにありますか？")
+        sys.exit(1)
+
+    print("\n--- Geminiにログの評価を依頼中... ---")
+    try:
+        client = genai.Client()
+        evaluation_prompt = create_evaluation_prompt(log_output)
+        
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=evaluation_prompt
+        )
+
+        print("\n--- 評価結果 ---")
+        json_text = response.text.strip()
+        match = re.search(r'```json\s*(\{.*?\})\s*```', json_text, re.DOTALL)
+        if match:
+            json_text = match.group(1)
+        
+        parsed_json = json.loads(json_text)
+        print(json.dumps(parsed_json, indent=2, ensure_ascii=False))
+
+    except Exception as e:
+        print(f"\nエラー: Geminiへの評価依頼中にエラーが発生しました。: {e}")
+        print("AIからの生のレスポンス:", response.text if 'response' in locals() else "N/A")
+
+if __name__ == "__main__":
+    main()
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: gemini-api_docs_20250717.md
+- 内容:
+# 詳細に理解して
+
+///
+
+Google GenAI SDKのドキュメント
+# 変更後を採用せよ！
+
+日本語
+
+AI
+Gemini API のドキュメント
+
+2024 年後半の Gemini 2.0 のリリース以降、Google GenAI SDK という新しいライブラリ セットが導入されました。更新されたクライアント アーキテクチャにより、デベロッパー エクスペリエンスが向上し、デベロッパー ワークフローとエンタープライズ ワークフロー間の移行が簡素化されます。
+
+Google GenAI SDK の一般提供（GA）が、サポートされているすべてのプラットフォームで開始されました。以前のライブラリを使用している場合は、移行することを強くおすすめします。
+
+このガイドでは、移行後のコードの例を移行前のコードと比較して示し、移行作業を開始する際の参考にしていただけるようにしています。
+
+注: Go の例では、読みやすさを向上させるために、インポートやその他のボイラープレート コードを省略しています。
+インストール
+変更前
+
+Python
+JavaScript
+Go
+
+pip install -U -q "google-generativeai"
+変更後
+
+Python
+JavaScript
+Go
+pip install -U -q "google-genai"
+API アクセス
+以前の SDK では、さまざまなアドホック メソッドを使用して、API クライアントがバックグラウンドで暗黙的に処理されていました。これにより、クライアントと認証情報の管理が困難になりました。これで、中央の Client オブジェクトを介してやり取りできるようになりました。この Client オブジェクトは、さまざまな API サービス（models、chats、files、tunings）を使用して、一貫性を高め、さまざまな API 呼び出しでの認証情報と構成の管理を簡素化します。
+
+以前（API アクセスの集中管理が不十分）
+
+Python
+JavaScript
+Go
+以前の SDK では、ほとんどの API 呼び出しでトップレベルのクライアント オブジェクトが明示的に使用されていませんでした。GenerativeModel オブジェクトを直接インスタンス化して操作します。
+
+import google.generativeai as genai
+
+# Directly create and use model objects
+model = genai.GenerativeModel('gemini-2.5-flash')
+response = model.generate_content(...)
+chat = model.start_chat(...)
+後（一元化されたクライアント オブジェクト）
+
+Python
+JavaScript
+Go
+from google import genai
+
+# Create a single client object
+client = genai.Client()
+
+# Access API methods through services on the client object
+response = client.models.generate_content(...)
+chat = client.chats.create(...)
+my_file = client.files.upload(...)
+tuning_job = client.tunings.tune(...)
+認証
+以前のライブラリと新しいライブラリの両方で、API キーを使用して認証します。Google AI Studio で API キーを作成できます。
+
+変更前
+
+Python
+JavaScript
+Go
+以前の SDK では、API クライアント オブジェクトが暗黙的に処理されていました。
+
+import google.generativeai as genai
+
+genai.configure(api_key=...)
+変更後
+
+Python
+JavaScript
+Go
+Google GenAI SDK では、最初に API クライアントを作成し、API の呼び出しに使用します。クライアントに API キーを渡さない場合、新しい SDK は GEMINI_API_KEY または GOOGLE_API_KEY のいずれかの環境変数から API キーを取得します。
+
+export GEMINI_API_KEY="YOUR_API_KEY"
+from google import genai
+
+client = genai.Client() # Set the API key using the GEMINI_API_KEY env var.
+                        # Alternatively, you could set the API key explicitly:
+                        # client = genai.Client(api_key="your_api_key")
+コンテンツの生成
+テキスト
+変更前
+
+Python
+JavaScript
+Go
+以前はクライアント オブジェクトがなく、GenerativeModel オブジェクトを介して API に直接アクセスしていました。
+
+import google.generativeai as genai
+
+model = genai.GenerativeModel('gemini-2.5-flash')
+response = model.generate_content(
+    'Tell me a story in 300 words'
+)
+print(response.text)
+変更後
+
+Python
+JavaScript
+Go
+新しい Google GenAI SDK では、Client オブジェクトを介してすべての API メソッドにアクセスできます。いくつかのステートフルな特殊なケース（chat とライブ API session）を除き、これらはすべてステートレス関数です。ユーティリティと均一性のために、返されるオブジェクトは pydantic クラスです。
+
+from google import genai
+client = genai.Client()
+
+response = client.models.generate_content(
+    model='gemini-2.0-flash',
+    contents='Tell me a story in 300 words.'
+)
+print(response.text)
+
+print(response.model_dump_json(
+    exclude_none=True, indent=4))
+画像
+変更前
+
+Python
+JavaScript
+Go
+import google.generativeai as genai
+
+model = genai.GenerativeModel('gemini-2.5-flash')
+response = model.generate_content([
+    'Tell me a story based on this image',
+    Image.open(image_path)
+])
+print(response.text)
+変更後
+
+Python
+JavaScript
+Go
+新しい SDK には、同じ利便性の高い機能が多数存在します。たとえば、PIL.Image オブジェクトは自動的に変換されます。
+
+from google import genai
+from PIL import Image
+
+client = genai.Client()
+
+response = client.models.generate_content(
+    model='gemini-2.0-flash',
+    contents=[
+        'Tell me a story based on this image',
+        Image.open(image_path)
+    ]
+)
+print(response.text)
+ストリーミング
+変更前
+
+Python
+JavaScript
+Go
+import google.generativeai as genai
+
+response = model.generate_content(
+    "Write a cute story about cats.",
+    stream=True)
+for chunk in response:
+    print(chunk.text)
+変更後
+
+Python
+JavaScript
+Go
+from google import genai
+
+client = genai.Client()
+
+for chunk in client.models.generate_content_stream(
+  model='gemini-2.0-flash',
+  contents='Tell me a story in 300 words.'
+):
+    print(chunk.text)
+構成
+変更前
+
+Python
+JavaScript
+Go
+import google.generativeai as genai
+
+model = genai.GenerativeModel(
+  'gemini-2.5-flash',
+    system_instruction='you are a story teller for kids under 5 years old',
+    generation_config=genai.GenerationConfig(
+      max_output_tokens=400,
+      top_k=2,
+      top_p=0.5,
+      temperature=0.5,
+      response_mime_type='application/json',
+      stop_sequences=['\n'],
+    )
+)
+response = model.generate_content('tell me a story in 100 words')
+変更後
+
+Python
+JavaScript
+Go
+新しい SDK のすべてのメソッドでは、必須の引数はキーワード引数として指定されます。省略可能な入力はすべて config 引数で指定します。構成引数は、google.genai.types Namespace の Python 辞書または Config クラスとして指定できます。ユーティリティと均一性のために、types モジュール内のすべての定義は pydantic クラスです。
+
+from google import genai
+from google.genai import types
+
+client = genai.Client()
+
+response = client.models.generate_content(
+  model='gemini-2.0-flash',
+  contents='Tell me a story in 100 words.',
+  config=types.GenerateContentConfig(
+      system_instruction='you are a story teller for kids under 5 years old',
+      max_output_tokens= 400,
+      top_k= 2,
+      top_p= 0.5,
+      temperature= 0.5,
+      response_mime_type= 'application/json',
+      stop_sequences= ['\n'],
+      seed=42,
+  ),
+)
+安全性設定
+安全性設定を使用してレスポンスを生成します。
+
+変更前
+
+Python
+JavaScript
+import google.generativeai as genai
+
+model = genai.GenerativeModel('gemini-2.5-flash')
+response = model.generate_content(
+    'say something bad',
+    safety_settings={
+        'HATE': 'BLOCK_ONLY_HIGH',
+        'HARASSMENT': 'BLOCK_ONLY_HIGH',
+  }
+)
+変更後
+
+Python
+JavaScript
+from google import genai
+from google.genai import types
+
+client = genai.Client()
+
+response = client.models.generate_content(
+  model='gemini-2.0-flash',
+  contents='say something bad',
+  config=types.GenerateContentConfig(
+      safety_settings= [
+          types.SafetySetting(
+              category='HARM_CATEGORY_HATE_SPEECH',
+              threshold='BLOCK_ONLY_HIGH'
+          ),
+      ]
+  ),
+)
+非同期
+変更前
+
+Python
+import google.generativeai as genai
+
+model = genai.GenerativeModel('gemini-2.5-flash')
+response = model.generate_content_async(
+    'tell me a story in 100 words'
+)
+変更後
+
+Python
+asyncio で新しい SDK を使用するには、client.aio のすべてのメソッドの個別の async 実装があります。
+
+from google import genai
+
+client = genai.Client()
+
+response = await client.aio.models.generate_content(
+    model='gemini-2.0-flash',
+    contents='Tell me a story in 300 words.'
+)
+チャット
+チャットを開始して、モデルにメッセージを送信します。
+
+変更前
+
+Python
+JavaScript
+Go
+import google.generativeai as genai
+
+model = genai.GenerativeModel('gemini-2.5-flash')
+chat = model.start_chat()
+
+response = chat.send_message(
+    "Tell me a story in 100 words")
+response = chat.send_message(
+    "What happened after that?")
+変更後
+
+Python
+JavaScript
+Go
+from google import genai
+
+client = genai.Client()
+
+chat = client.chats.create(model='gemini-2.0-flash')
+
+response = chat.send_message(
+    message='Tell me a story in 100 words')
+response = chat.send_message(
+    message='What happened after that?')
+関数呼び出し
+変更前
+
+Python
+import google.generativeai as genai
+from enum import Enum
+
+def get_current_weather(location: str) -> str:
+    """Get the current whether in a given location.
+
+    Args:
+        location: required, The city and state, e.g. San Franciso, CA
+        unit: celsius or fahrenheit
+    """
+    print(f'Called with: {location=}')
+    return "23C"
+
+model = genai.GenerativeModel(
+    model_name="gemini-2.5-flash",
+    tools=[get_current_weather]
+)
+
+response = model.generate_content("What is the weather in San Francisco?")
+function_call = response.candidates[0].parts[0].function_call
+変更後
+
+Python
+新しい SDK では、関数の自動呼び出しがデフォルトになっています。ここでは、無効にします。
+
+from google import genai
+from google.genai import types
+
+client = genai.Client()
+
+def get_current_weather(location: str) -> str:
+    """Get the current whether in a given location.
+
+    Args:
+        location: required, The city and state, e.g. San Franciso, CA
+        unit: celsius or fahrenheit
+    """
+    print(f'Called with: {location=}')
+    return "23C"
+
+response = client.models.generate_content(
+  model='gemini-2.0-flash',
+  contents="What is the weather like in Boston?",
+  config=types.GenerateContentConfig(
+      tools=[get_current_weather],
+      automatic_function_calling={'disable': True},
+  ),
+)
+
+function_call = response.candidates[0].content.parts[0].function_call
+関数の自動呼び出し
+変更前
+
+Python
+以前の SDK では、チャットでの自動関数呼び出しのみがサポートされています。新しい SDK では、これが generate_content のデフォルトの動作です。
+
+import google.generativeai as genai
+
+def get_current_weather(city: str) -> str:
+    return "23C"
+
+model = genai.GenerativeModel(
+    model_name="gemini-2.5-flash",
+    tools=[get_current_weather]
+)
+
+chat = model.start_chat(
+    enable_automatic_function_calling=True)
+result = chat.send_message("What is the weather in San Francisco?")
+変更後
+
+Python
+from google import genai
+from google.genai import types
+client = genai.Client()
+
+def get_current_weather(city: str) -> str:
+    return "23C"
+
+response = client.models.generate_content(
+  model='gemini-2.0-flash',
+  contents="What is the weather like in Boston?",
+  config=types.GenerateContentConfig(
+      tools=[get_current_weather]
+  ),
+)
+コードの実行
+コード実行は、モデルが Python コードを生成して実行し、結果を返すことができるツールです。
+
+変更前
+
+Python
+JavaScript
+import google.generativeai as genai
+
+model = genai.GenerativeModel(
+    model_name="gemini-2.5-flash",
+    tools="code_execution"
+)
+
+result = model.generate_content(
+  "What is the sum of the first 50 prime numbers? Generate and run code for "
+  "the calculation, and make sure you get all 50.")
+変更後
+
+Python
+JavaScript
+from google import genai
+from google.genai import types
+
+client = genai.Client()
+
+response = client.models.generate_content(
+    model='gemini-2.0-flash',
+    contents='What is the sum of the first 50 prime numbers? Generate and run '
+            'code for the calculation, and make sure you get all 50.',
+    config=types.GenerateContentConfig(
+        tools=[types.Tool(code_execution=types.ToolCodeExecution)],
+    ),
+)
+検索によるグラウンディング
+GoogleSearch（Gemini>=2.0）と GoogleSearchRetrieval（Gemini < 2.0）は、Google を利用して、モデルがグラウンディング用の公開ウェブデータを取得できるようにするツールです。
+
+変更前
+
+Python
+import google.generativeai as genai
+
+model = genai.GenerativeModel('gemini-2.5-flash')
+response = model.generate_content(
+    contents="what is the Google stock price?",
+    tools='google_search_retrieval'
+)
+変更後
+
+Python
+from google import genai
+from google.genai import types
+
+client = genai.Client()
+
+response = client.models.generate_content(
+    model='gemini-2.0-flash',
+    contents='What is the Google stock price?',
+    config=types.GenerateContentConfig(
+        tools=[
+            types.Tool(
+                google_search=types.GoogleSearch()
+            )
+        ]
+    )
+)
+JSON レスポンス
+JSON 形式で回答を生成します。
+
+変更前
+
+Python
+JavaScript
+response_schema を指定して response_mime_type="application/json" を設定すると、モデルを制約して、指定された構造に従って JSON レスポンスを生成できます。
+
+import google.generativeai as genai
+import typing_extensions as typing
+
+class CountryInfo(typing.TypedDict):
+    name: str
+    population: int
+    capital: str
+    continent: str
+    major_cities: list[str]
+    gdp: int
+    official_language: str
+    total_area_sq_mi: int
+
+model = genai.GenerativeModel(model_name="gemini-2.5-flash")
+result = model.generate_content(
+    "Give me information of the United States",
+    generation_config=genai.GenerationConfig(
+        response_mime_type="application/json",
+        response_schema = CountryInfo
+    ),
+)
+変更後
+
+Python
+JavaScript
+新しい SDK は、pydantic クラスを使用してスキーマを提供します（genai.types.Schema または同等の dict を渡すこともできます）。可能な場合、SDK は返された JSON を解析し、結果を response.parsed で返します。スキーマとして pydantic クラスを指定した場合、SDK はその JSON をクラスのインスタンスに変換します。
+
+from google import genai
+from pydantic import BaseModel
+
+client = genai.Client()
+
+class CountryInfo(BaseModel):
+    name: str
+    population: int
+    capital: str
+    continent: str
+    major_cities: list[str]
+    gdp: int
+    official_language: str
+    total_area_sq_mi: int
+
+response = client.models.generate_content(
+    model='gemini-2.0-flash',
+    contents='Give me information of the United States.',
+    config={
+        'response_mime_type': 'application/json',
+        'response_schema': CountryInfo,
+    },
+)
+
+response.parsed
+ファイル
+アップロード
+ファイルをアップロードする:
+
+変更前
+
+Python
+import requests
+import pathlib
+import google.generativeai as genai
+
+# Download file
+response = requests.get(
+    'https://storage.googleapis.com/generativeai-downloads/data/a11.txt')
+pathlib.Path('a11.txt').write_text(response.text)
+
+file = genai.upload_file(path='a11.txt')
+
+model = genai.GenerativeModel('gemini-2.5-flash')
+response = model.generate_content([
+    'Can you summarize this file:',
+    my_file
+])
+print(response.text)
+変更後
+
+Python
+import requests
+import pathlib
+from google import genai
+
+client = genai.Client()
+
+# Download file
+response = requests.get(
+    'https://storage.googleapis.com/generativeai-downloads/data/a11.txt')
+pathlib.Path('a11.txt').write_text(response.text)
+
+my_file = client.files.upload(file='a11.txt')
+
+response = client.models.generate_content(
+    model='gemini-2.0-flash',
+    contents=[
+        'Can you summarize this file:',
+        my_file
+    ]
+)
+print(response.text)
+一覧表示と取得
+アップロードされたファイルを一覧表示し、ファイル名でアップロードされたファイルを取得します。
+
+変更前
+
+Python
+import google.generativeai as genai
+
+for file in genai.list_files():
+  print(file.name)
+
+file = genai.get_file(name=file.name)
+変更後
+
+Python
+from google import genai
+client = genai.Client()
+
+for file in client.files.list():
+    print(file.name)
+
+file = client.files.get(name=file.name)
+削除
+ファイルを削除する:
+
+変更前
+
+Python
+import pathlib
+import google.generativeai as genai
+
+pathlib.Path('dummy.txt').write_text(dummy)
+dummy_file = genai.upload_file(path='dummy.txt')
+
+file = genai.delete_file(name=dummy_file.name)
+変更後
+
+Python
+import pathlib
+from google import genai
+
+client = genai.Client()
+
+pathlib.Path('dummy.txt').write_text(dummy)
+dummy_file = client.files.upload(file='dummy.txt')
+
+response = client.files.delete(name=dummy_file.name)
+コンテキストのキャッシュ保存
+コンテキスト キャッシュ保存を使用すると、コンテンツをモデルに 1 回渡して入力トークンをキャッシュに保存し、後続の呼び出しでキャッシュに保存されたトークンを参照して費用を削減できます。
+
+変更前
+
+Python
+JavaScript
+import requests
+import pathlib
+import google.generativeai as genai
+from google.generativeai import caching
+
+# Download file
+response = requests.get(
+    'https://storage.googleapis.com/generativeai-downloads/data/a11.txt')
+pathlib.Path('a11.txt').write_text(response.text)
+
+# Upload file
+document = genai.upload_file(path="a11.txt")
+
+# Create cache
+apollo_cache = caching.CachedContent.create(
+    model="gemini-2.5-flash-001",
+    system_instruction="You are an expert at analyzing transcripts.",
+    contents=[document],
+)
+
+# Generate response
+apollo_model = genai.GenerativeModel.from_cached_content(
+    cached_content=apollo_cache
+)
+response = apollo_model.generate_content("Find a lighthearted moment from this transcript")
+変更後
+
+Python
+JavaScript
+import requests
+import pathlib
+from google import genai
+from google.genai import types
+
+client = genai.Client()
+
+# Check which models support caching.
+for m in client.models.list():
+  for action in m.supported_actions:
+    if action == "createCachedContent":
+      print(m.name)
+      break
+
+# Download file
+response = requests.get(
+    'https://storage.googleapis.com/generativeai-downloads/data/a11.txt')
+pathlib.Path('a11.txt').write_text(response.text)
+
+# Upload file
+document = client.files.upload(file='a11.txt')
+
+# Create cache
+model='gemini-2.5-flash-001'
+apollo_cache = client.caches.create(
+      model=model,
+      config={
+          'contents': [document],
+          'system_instruction': 'You are an expert at analyzing transcripts.',
+      },
+  )
+
+# Generate response
+response = client.models.generate_content(
+    model=model,
+    contents='Find a lighthearted moment from this transcript',
+    config=types.GenerateContentConfig(
+        cached_content=apollo_cache.name,
+    )
+)
+トークンのカウント
+リクエスト内のトークン数をカウントします。
+
+変更前
+
+Python
+JavaScript
+import google.generativeai as genai
+
+model = genai.GenerativeModel('gemini-2.5-flash')
+response = model.count_tokens(
+    'The quick brown fox jumps over the lazy dog.')
+変更後
+
+Python
+JavaScript
+from google import genai
+
+client = genai.Client()
+
+response = client.models.count_tokens(
+    model='gemini-2.0-flash',
+    contents='The quick brown fox jumps over the lazy dog.',
+)
+画像を生成
+画像を生成する:
+
+変更前
+
+Python
+#pip install https://github.com/google-gemini/generative-ai-python@imagen
+import google.generativeai as genai
+
+imagen = genai.ImageGenerationModel(
+    "imagen-3.0-generate-001")
+gen_images = imagen.generate_images(
+    prompt="Robot holding a red skateboard",
+    number_of_images=1,
+    safety_filter_level="block_low_and_above",
+    person_generation="allow_adult",
+    aspect_ratio="3:4",
+)
+変更後
+
+Python
+from google import genai
+
+client = genai.Client()
+
+gen_images = client.models.generate_images(
+    model='imagen-3.0-generate-001',
+    prompt='Robot holding a red skateboard',
+    config=types.GenerateImagesConfig(
+        number_of_images= 1,
+        safety_filter_level= "BLOCK_LOW_AND_ABOVE",
+        person_generation= "ALLOW_ADULT",
+        aspect_ratio= "3:4",
+    )
+)
+
+for n, image in enumerate(gen_images.generated_images):
+    pathlib.Path(f'{n}.png').write_bytes(
+        image.image.image_bytes)
+コンテンツを埋め込む
+コンテンツ エンベディングを生成する。
+
+変更前
+
+Python
+JavaScript
+import google.generativeai as genai
+
+response = genai.embed_content(
+  model='models/gemini-embedding-001',
+  content='Hello world'
+)
+変更後
+
+Python
+JavaScript
+from google import genai
+
+client = genai.Client()
+
+response = client.models.embed_content(
+  model='gemini-embedding-001',
+  contents='Hello world',
+)
+モデルをチューニングする
+チューニング済みモデルを作成して使用する。
+
+新しい SDK では、client.tunings.tune を使用してチューニングを簡素化します。これにより、チューニング ジョブが起動され、ジョブが完了するまでポーリングが行われます。
+
+変更前
+
+Python
+import google.generativeai as genai
+import random
+
+# create tuning model
+train_data = {}
+for i in range(1, 6):
+  key = f'input {i}'
+  value = f'output {i}'
+  train_data[key] = value
+
+name = f'generate-num-{random.randint(0,10000)}'
+operation = genai.create_tuned_model(
+    source_model='models/gemini-2.5-flash-001-tuning',
+    training_data=train_data,
+    id = name,
+    epoch_count = 5,
+    batch_size=4,
+    learning_rate=0.001,
+)
+# wait for tuning complete
+tuningProgress = operation.result()
+
+# generate content with the tuned model
+model = genai.GenerativeModel(model_name=f'tunedModels/{name}')
+response = model.generate_content('55')
+変更後
+
+Python
+from google import genai
+from google.genai import types
+
+client = genai.Client()
+
+# Check which models are available for tuning.
+for m in client.models.list():
+  for action in m.supported_actions:
+    if action == "createTunedModel":
+      print(m.name)
+      break
+
+# create tuning model
+training_dataset=types.TuningDataset(
+        examples=[
+            types.TuningExample(
+                text_input=f'input {i}',
+                output=f'output {i}',
+            )
+            for i in range(5)
+        ],
+    )
+tuning_job = client.tunings.tune(
+    base_model='models/gemini-2.5-flash-001-tuning',
+    training_dataset=training_dataset,
+    config=types.CreateTuningJobConfig(
+        epoch_count= 5,
+        batch_size=4,
+        learning_rate=0.001,
+        tuned_model_display_name="test tuned model"
+    )
+)
+
+# generate content with the tuned model
+response = client.models.generate_content(
+    model=tuning_job.tuned_model.model,
+    contents='55',
+)
+
+最終更新日 2025-07-24 UTC。
+
+///
+
+Google 検索によるグラウンディングは、Gemini モデルをリアルタイムのウェブ コンテンツに接続します。すべての利用可能な言語で動作します。これにより、Gemini はより正確な回答を提供し、ナレッジのカットオフを超えて検証可能なソースを引用できるようになります。
+
+グラウンドングは、次のことができるアプリケーションを構築するのに役立ちます。
+
+事実の正確性を高める: 回答を実世界の情報に基づいて生成することで、モデルのハルシネーションを軽減します。
+リアルタイムの情報にアクセスする: 最新のイベントやトピックに関する質問に回答します。
+引用を提供する: モデルの主張の出典を示すことで、ユーザーの信頼を築きます。
+
+Python
+JavaScript
+REST
+from google import genai
+from google.genai import types
+
+# Configure the client
+client = genai.Client()
+
+# Define the grounding tool
+grounding_tool = types.Tool(
+    google_search=types.GoogleSearch()
+)
+
+# Configure generation settings
+config = types.GenerateContentConfig(
+    tools=[grounding_tool]
+)
+
+# Make the request
+response = client.models.generate_content(
+    model="gemini-2.5-flash",
+    contents="Who won the euro 2024?",
+    config=config,
+)
+
+# Print the grounded response
+print(response.text)
+詳しくは、検索ツール ノートブックをお試しください。
+
+Google 検索によるグラウンディングの仕組み
+google_search ツールを有効にすると、モデルが情報の検索、処理、引用のワークフローをすべて自動的に処理します。
+
+grounding-overview
+
+ユーザー プロンプト: アプリは、google_search ツールを有効にして、ユーザーのプロンプトを Gemini API に送信します。
+プロンプトの分析: モデルはプロンプトを分析し、Google 検索で回答を改善できるかどうかを判断します。
+Google 検索: 必要に応じて、モデルは 1 つ以上の検索語句を自動的に生成して実行します。
+検索結果の処理: モデルは検索結果を処理し、情報を統合して回答を作成します。
+Grounded Response: API は、検索結果に基づく、ユーザー フレンドリーな最終レスポンスを返します。このレスポンスには、モデルのテキスト回答と、検索クエリ、ウェブ検索結果、引用を含む groundingMetadata が含まれます。
+グラウンディング レスポンスを理解する
+レスポンスが正常に接地されると、レスポンスに groundingMetadata フィールドが含まれます。この構造化データは、申し立ての検証と、アプリ内での豊富な引用機能の構築に不可欠です。
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Spain won Euro 2024, defeating England 2-1 in the final. This victory marks Spain's record fourth European Championship title."
+          }
+        ],
+        "role": "model"
+      },
+      "groundingMetadata": {
+        "webSearchQueries": [
+          "UEFA Euro 2024 winner",
+          "who won euro 2024"
+        ],
+        "searchEntryPoint": {
+          "renderedContent": "<!-- HTML and CSS for the search widget -->"
+        },
+        "groundingChunks": [
+          {"web": {"uri": "https://vertexaisearch.cloud.google.com.....", "title": "aljazeera.com"}},
+          {"web": {"uri": "https://vertexaisearch.cloud.google.com.....", "title": "uefa.com"}}
+        ],
+        "groundingSupports": [
+          {
+            "segment": {"startIndex": 0, "endIndex": 85, "text": "Spain won Euro 2024, defeatin..."},
+            "groundingChunkIndices": [0]
+          },
+          {
+            "segment": {"startIndex": 86, "endIndex": 210, "text": "This victory marks Spain's..."},
+            "groundingChunkIndices": [0, 1]
+          }
+        ]
+      }
+    }
+  ]
+}
+Gemini API は、groundingMetadata とともに次の情報を返します。
+
+webSearchQueries : 使用された検索クエリの配列。これは、モデルの推論プロセスのデバッグと理解に役立ちます。
+searchEntryPoint : 必要な検索候補をレンダリングする HTML と CSS が含まれています。使用要件の詳細については、利用規約をご覧ください。
+groundingChunks : ウェブソース（uri と title）を含むオブジェクトの配列。
+groundingSupports : モデル レスポンス text を groundingChunks のソースに接続するチャンクの配列。各チャンクは、テキスト segment（startIndex と endIndex で定義）を 1 つ以上の groundingChunkIndices にリンクします。これが、インライン引用を作成するうえで重要なポイントです。
+Google 検索によるグラウンディングは、URL コンテキスト ツールと組み合わせて使用することもできます。これにより、一般公開のウェブデータと指定した特定の URL の両方でレスポンスをグラウンディングできます。
+
+インライン引用を使用してソースを帰属する
+この API は構造化された引用データを返すため、ユーザー インターフェースでソースを表示する方法を完全に制御できます。groundingSupports フィールドと groundingChunks フィールドを使用すると、モデルのステートメントをソースに直接リンクできます。以下は、メタデータを処理して、クリック可能なインライン引用を含むレスポンスを作成する一般的なパターンです。
+
+Python
+JavaScript
+def add_citations(response):
+    text = response.text
+    supports = response.candidates[0].grounding_metadata.grounding_supports
+    chunks = response.candidates[0].grounding_metadata.grounding_chunks
+
+    # Sort supports by end_index in descending order to avoid shifting issues when inserting.
+    sorted_supports = sorted(supports, key=lambda s: s.segment.end_index, reverse=True)
+
+    for support in sorted_supports:
+        end_index = support.segment.end_index
+        if support.grounding_chunk_indices:
+            # Create citation string like [1](link1)[2](link2)
+            citation_links = []
+            for i in support.grounding_chunk_indices:
+                if i < len(chunks):
+                    uri = chunks[i].web.uri
+                    citation_links.append(f"[{i + 1}]({uri})")
+
+            citation_string = ", ".join(citation_links)
+            text = text[:end_index] + citation_string + text[end_index:]
+
+    return text
+
+# Assuming response with grounding metadata
+text_with_citations = add_citations(response)
+print(text_with_citations)
+Spain won Euro 2024, defeating England 2-1 in the final.[1](https:/...), [2](https:/...), [4](https:/...), [5](https:/...) This victory marks Spain's record-breaking fourth European Championship title.[5]((https:/...), [2](https:/...), [3](https:/...), [4](https:/...)
+料金
+Google 検索でグラウンディングを使用する場合、プロジェクトは google_search ツールを含む API リクエストごとに課金されます。モデルが 1 つのプロンプトに応答するために複数の検索クエリを実行する場合（同じ API 呼び出し内で "UEFA Euro 2024 winner" と "Spain vs England Euro 2024 final score" を検索する場合など）、そのリクエストに対するツールの課金対象の使用は 1 回とカウントされます。
+
+料金の詳細については、Gemini API の料金ページをご覧ください。
+
+サポートされているモデル
+試験運用版モデルとプレビュー版モデルは含まれません。これらの機能は、モデルの概要ページで確認できます。
+
+モデル	Google 検索によるグラウンディング
+Gemini 2.5 Pro	✔️
+Gemini 2.5 Flash	✔️
+Gemini 2.0 Flash	✔️
+Gemini 1.5 Pro	✔️
+Gemini 1.5 Flash	✔️
+注: 古いモデルでは google_search_retrieval ツールを使用します。現在のすべてのモデルでは、例に示すように google_search ツールを使用します。
+Gemini 1.5 モデルを使用したグラウンディング（従来版）
+Gemini 2.0 以降では google_search ツールの使用をおすすめしますが、Gemini 1.5 では google_search_retrieval というレガシー ツールがサポートされています。このツールには、プロンプトに新しい情報が必要な信頼度に基づいて、モデルが検索を実行するかどうかを決定できる dynamic モードが用意されています。モデルの信頼度が、設定した dynamic_threshold（0.0 ～ 1.0 の値）を超えると、検索が実行されます。
+
+Python
+JavaScript
+REST
+# Note: This is a legacy approach for Gemini 1.5 models.
+# The 'google_search' tool is recommended for all new development.
+import os
+from google import genai
+from google.genai import types
+
+client = genai.Client()
+
+retrieval_tool = types.Tool(
+    google_search_retrieval=types.GoogleSearchRetrieval(
+        dynamic_retrieval_config=types.DynamicRetrievalConfig(
+            mode=types.DynamicRetrievalConfigMode.MODE_DYNAMIC,
+            dynamic_threshold=0.7 # Only search if confidence > 70%
+        )
+    )
+)
+
+config = types.GenerateContentConfig(
+    tools=[retrieval_tool]
+)
+
+response = client.models.generate_content(
+    model='gemini-2.5-flash',
+    contents="Who won the euro 2024?",
+    config=config,
+)
+print(response.text)
+if not response.candidates[0].grounding_metadata:
+  print("\nModel answered from its own knowledge.")
+次のステップ
+Gemini API クックブックの Google 検索によるグラウンディングをお試しください。
+
+最終更新日 2025-07-24 UTC。
+
+
+
+///
+
+
+試験運用版: URL コンテキスト ツールは試験運用版の機能です。
+URL コンテキスト ツールを使用すると、プロンプトの追加コンテキストとして URL を Gemini に提供できます。モデルは URL からコンテンツを取得し、そのコンテンツを使用してレスポンスを通知して形成できます。
+
+このツールは、次のようなタスクに役立ちます。
+
+記事から重要なデータポイントや話題を抽出する
+複数のリンク間で情報を比較する
+複数のソースからのデータを統合する
+特定のページの内容に基づいて質問に回答する
+特定の目的（求人情報の作成やテスト問題の作成など）でコンテンツを分析する
+このガイドでは、Gemini API の URL コンテキスト ツールの使用方法について説明します。
+
+URL コンテキストを使用する
+URL コンテキスト ツールは、単独で使用することも、Google 検索によるグラウンディングと組み合わせて使用することもできます。
+
+URL コンテキストのみ
+
+モデルに直接分析させる特定の URL をプロンプトで指定します。
+
+プロンプトの例:
+
+
+Summarize this document: YOUR_URLs
+
+Extract the key features from the product description on this page: YOUR_URLs
+Google 検索 + URL コンテキストによるグラウンディング
+
+URL コンテキストと Google 検索によるグラウンディングの両方を有効にすることもできます。プロンプトは URL の有無にかかわらず入力できます。モデルはまず関連情報を検索し、次に URL コンテキスト ツールを使用して検索結果のコンテンツを読み取り、より詳細に理解します。
+
+プロンプトの例:
+
+
+Give me three day events schedule based on YOUR_URL. Also let me know what needs to taken care of considering weather and commute.
+
+Recommend 3 books for beginners to read to learn more about the latest YOUR_subject.
+URL コンテキストのみのコード例
+Python
+JavaScript
+REST
+
+from google import genai
+from google.genai.types import Tool, GenerateContentConfig, GoogleSearch
+
+client = genai.Client()
+model_id = "gemini-2.5-flash"
+
+url_context_tool = Tool(
+    url_context = types.UrlContext
+)
+
+response = client.models.generate_content(
+    model=model_id,
+    contents="Compare recipes from YOUR_URL1 and YOUR_URL2",
+    config=GenerateContentConfig(
+        tools=[url_context_tool],
+        response_modalities=["TEXT"],
+    )
+)
+
+for each in response.candidates[0].content.parts:
+    print(each.text)
+# get URLs retrieved for context
+print(response.candidates[0].url_context_metadata)
+
+Google 検索によるグラウンディングを使用したコード例
+Python
+JavaScript
+REST
+
+from google import genai
+from google.genai.types import Tool, GenerateContentConfig, GoogleSearch
+
+client = genai.Client()
+model_id = "gemini-2.5-flash"
+
+tools = []
+tools.append(Tool(url_context=types.UrlContext))
+tools.append(Tool(google_search=types.GoogleSearch))
+
+response = client.models.generate_content(
+    model=model_id,
+    contents="Give me three day events schedule based on YOUR_URL. Also let me know what needs to taken care of considering weather and commute.",
+    config=GenerateContentConfig(
+        tools=tools,
+        response_modalities=["TEXT"],
+    )
+)
+
+for each in response.candidates[0].content.parts:
+    print(each.text)
+# get URLs retrieved for context
+print(response.candidates[0].url_context_metadata)
+
+Google 検索によるグラウンディングの詳細については、概要ページをご覧ください。
+
+コンテキストに応じたレスポンス
+モデルのレスポンスは、URL から取得したコンテンツに基づいています。モデルが URL からコンテンツを取得した場合、レスポンスには url_context_metadata が含まれます。このようなレスポンスは次のようになります（簡潔にするため、レスポンスの一部を省略しています）。
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "... \n"
+          }
+        ],
+        "role": "model"
+      },
+      ...
+      "url_context_metadata":
+      {
+          "url_metadata":
+          [
+            {
+              "retrieved_url": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/1234567890abcdef",
+              "url_retrieval_status": <UrlRetrievalStatus.URL_RETRIEVAL_STATUS_SUCCESS: "URL_RETRIEVAL_STATUS_SUCCESS">
+            },
+            {
+              "retrieved_url": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/abcdef1234567890",
+              "url_retrieval_status": <UrlRetrievalStatus.URL_RETRIEVAL_STATUS_SUCCESS: "URL_RETRIEVAL_STATUS_SUCCESS">
+            },
+            {
+              "retrieved_url": "YOUR_URL",
+              "url_retrieval_status": <UrlRetrievalStatus.URL_RETRIEVAL_STATUS_SUCCESS: "URL_RETRIEVAL_STATUS_SUCCESS">
+            },
+            {
+              "retrieved_url": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/fedcba0987654321",
+              "url_retrieval_status": <UrlRetrievalStatus.URL_RETRIEVAL_STATUS_SUCCESS: "URL_RETRIEVAL_STATUS_SUCCESS">
+            }
+          ]
+        }
+    }
+}
+サポートされているモデル
+gemini-2.5-pro
+gemini-2.5-flash
+gemini-2.5-flash-lite
+gemini-2.0-flash
+gemini-2.0-flash-live-001
+制限事項
+このツールは、分析のためにリクエストごとに最大 20 個の URL を使用します。
+試験運用版の段階では、YouTube 動画などのマルチメディア コンテンツではなく、標準のウェブページでツールを使用することをおすすめします。
+試験運用期間中は、このツールは無料でご利用いただけます。請求は後日行われます。
+試験運用版のリリースには次の割り当てがあります。
+
+
+最終更新日 2025-07-24 UTC。
+
+///
+
+
+
+Gemini API を使用した関数呼び出し
+
+
+
+関数呼び出しを使用すると、モデルを外部ツールや API に接続できます。モデルは、テキスト レスポンスを生成するのではなく、特定の関数を呼び出すタイミングを判断し、現実世界のアクションを実行するために必要なパラメータを提供します。これにより、モデルは自然言語と実際のアクションやデータとの間の橋渡しとして機能できます。関数呼び出しには、主に次の 3 つのユースケースがあります。
+
+知識の拡張: データベース、API、ナレッジベースなどの外部ソースから情報にアクセスします。
+機能の拡張: 外部ツールを使用して計算を行い、モデルの制限を拡張します（電卓の使用やグラフの作成など）。
+アクションを実行する: API を使用して外部システムとやり取りします。たとえば、予定のスケジュール設定、請求書の作成、メールの送信、スマートホーム デバイスの制御などです。
+天気を取得 会議のスケジュールを設定 グラフを作成
+
+Python
+JavaScript
+REST
+
+from google import genai
+from google.genai import types
+
+# Define the function declaration for the model
+schedule_meeting_function = {
+    "name": "schedule_meeting",
+    "description": "Schedules a meeting with specified attendees at a given time and date.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "attendees": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "List of people attending the meeting.",
+            },
+            "date": {
+                "type": "string",
+                "description": "Date of the meeting (e.g., '2024-07-29')",
+            },
+            "time": {
+                "type": "string",
+                "description": "Time of the meeting (e.g., '15:00')",
+            },
+            "topic": {
+                "type": "string",
+                "description": "The subject or topic of the meeting.",
+            },
+        },
+        "required": ["attendees", "date", "time", "topic"],
+    },
+}
+
+# Configure the client and tools
+client = genai.Client()
+tools = types.Tool(function_declarations=[schedule_meeting_function])
+config = types.GenerateContentConfig(tools=[tools])
+
+# Send request with function declarations
+response = client.models.generate_content(
+    model="gemini-2.5-flash",
+    contents="Schedule a meeting with Bob and Alice for 03/14/2025 at 10:00 AM about the Q3 planning.",
+    config=config,
+)
+
+# Check for a function call
+if response.candidates[0].content.parts[0].function_call:
+    function_call = response.candidates[0].content.parts[0].function_call
+    print(f"Function to call: {function_call.name}")
+    print(f"Arguments: {function_call.args}")
+    #  In a real app, you would call your function here:
+    #  result = schedule_meeting(**function_call.args)
+else:
+    print("No function call found in the response.")
+    print(response.text)
+関数呼び出しの仕組み
+関数呼び出しの概要
+
+関数呼び出しでは、アプリケーション、モデル、外部関数間の構造化されたやり取りが行われます。プロセスの詳細は次のとおりです。
+
+関数宣言を定義する: アプリケーション コードで関数宣言を定義します。関数宣言は、関数名、パラメータ、目的をモデルに記述します。
+関数宣言を使用して LLM を呼び出す: ユーザー プロンプトと関数宣言をモデルに送信します。リクエストを分析し、関数呼び出しが役立つかどうかを判断します。その場合、構造化された JSON オブジェクトで応答します。
+関数コードの実行（お客様の責任）: モデルは関数自体を実行しません。
+レスポンスを処理し、関数呼び出しを確認するのは、アプリケーションの責任です。
+はい: 関数の名前と引数を抽出し、アプリケーション内の対応する関数を実行します。
+いいえ: モデルがプロンプトに対して直接テキスト レスポンスを提供しました（このフローは例ではあまり強調されていませんが、結果としてありえます）。
+ユーザー フレンドリーなレスポンスを作成する: 関数が実行された場合は、結果を取得して、会話の次のターンでモデルに送り返します。この結果を使用して、関数呼び出しからの情報を取り込んだ、ユーザー フレンドリーな最終的なレスポンスを生成します。
+このプロセスは複数回繰り返すことができ、複雑なインタラクションとワークフローが可能になります。このモデルは、1 つのターンで複数の関数を並列に呼び出す（並列関数呼び出し）ことと、順番に呼び出す（構成関数呼び出し）こともサポートしています。
+
+ステップ 1: 関数宣言を定義する
+ユーザーが照明の値を設定して API リクエストを行うことができる関数とその宣言を、アプリコード内で定義します。この関数は、外部サービスまたは API を呼び出す可能性があります。
+
+Python
+JavaScript
+# Define a function that the model can call to control smart lights
+set_light_values_declaration = {
+    "name": "set_light_values",
+    "description": "Sets the brightness and color temperature of a light.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "brightness": {
+                "type": "integer",
+                "description": "Light level from 0 to 100. Zero is off and 100 is full brightness",
+            },
+            "color_temp": {
+                "type": "string",
+                "enum": ["daylight", "cool", "warm"],
+                "description": "Color temperature of the light fixture, which can be `daylight`, `cool` or `warm`.",
+            },
+        },
+        "required": ["brightness", "color_temp"],
+    },
+}
+
+# This is the actual function that would be called based on the model's suggestion
+def set_light_values(brightness: int, color_temp: str) -> dict[str, int | str]:
+    """Set the brightness and color temperature of a room light. (mock API).
+
+    Args:
+        brightness: Light level from 0 to 100. Zero is off and 100 is full brightness
+        color_temp: Color temperature of the light fixture, which can be `daylight`, `cool` or `warm`.
+
+    Returns:
+        A dictionary containing the set brightness and color temperature.
+    """
+    return {"brightness": brightness, "colorTemperature": color_temp}
+ステップ 2: 関数宣言を使用してモデルを呼び出す
+関数宣言を定義したら、モデルにそれらを使用するように指示できます。プロンプトと関数宣言を分析し、直接応答するか関数を呼び出すかを決定します。関数が呼び出されると、レスポンス オブジェクトに関数呼び出しの候補が含まれます。
+
+Python
+JavaScript
+from google.genai import types
+
+# Configure the client and tools
+client = genai.Client()
+tools = types.Tool(function_declarations=[set_light_values_declaration])
+config = types.GenerateContentConfig(tools=[tools])
+
+# Define user prompt
+contents = [
+    types.Content(
+        role="user", parts=[types.Part(text="Turn the lights down to a romantic level")]
+    )
+]
+
+# Send request with function declarations
+response = client.models.generate_content(
+    model="gemini-2.5-flash",
+    contents=contents
+    config=config,
+)
+
+print(response.candidates[0].content.parts[0].function_call)
+モデルは、ユーザーの質問に回答するために宣言された 1 つ以上の関数を呼び出す方法を指定する OpenAPI 互換スキーマで functionCall オブジェクトを返します。
+
+Python
+JavaScript
+id=None args={'color_temp': 'warm', 'brightness': 25} name='set_light_values'
+ステップ 3: set_light_values 関数コードを実行する
+モデルのレスポンスから関数呼び出しの詳細を抽出し、引数を解析して、set_light_values 関数を実行します。
+
+Python
+JavaScript
+# Extract tool call details, it may not be in the first part.
+tool_call = response.candidates[0].content.parts[0].function_call
+
+if tool_call.name == "set_light_values":
+    result = set_light_values(**tool_call.args)
+    print(f"Function execution result: {result}")
+ステップ 4: 関数結果を使用してユーザー フレンドリーなレスポンスを作成し、モデルを再度呼び出す
+最後に、関数の実行結果をモデルに送り返し、モデルがこの情報をユーザーへの最終的なレスポンスに組み込めるようにします。
+
+Python
+JavaScript
+# Create a function response part
+function_response_part = types.Part.from_function_response(
+    name=tool_call.name,
+    response={"result": result},
+)
+
+# Append function call and result of the function execution to contents
+contents.append(response.candidates[0].content) # Append the content from the model's response.
+contents.append(types.Content(role="user", parts=[function_response_part])) # Append the function response
+
+final_response = client.models.generate_content(
+    model="gemini-2.5-flash",
+    config=config,
+    contents=contents,
+)
+
+print(final_response.text)
+これで、関数呼び出しフローが完了します。モデルは set_light_values 関数を使用して、ユーザーのリクエスト アクションを正常に実行しました。
+
+関数宣言
+プロンプトで関数呼び出しを実装する場合は、1 つ以上の function declarations を含む tools オブジェクトを作成します。関数は JSON を使用して定義します。具体的には、OpenAPI スキーマ形式のサブセットを選択します。1 つの関数宣言に含めることができるパラメータは、次のとおりです。
+
+name（文字列）: 関数の一意の名前（get_weather_forecast、send_email）。スペースや特殊文字を含まないわかりやすい名前を使用します（アンダースコアまたは camelCase を使用）。
+description（文字列）: 関数の目的と機能についての明確で詳細な説明。これは、モデルが関数を使用するタイミングを理解するために重要です。具体的に説明し、必要に応じて例を挙げてください（「場所と、必要に応じて映画館で上映中の映画のタイトルに基づいて映画館を検索します。」）。
+parameters（オブジェクト）: 関数が想定する入力パラメータを定義します。
+type（文字列）: 全体的なデータ型（object など）を指定します。
+properties（オブジェクト）: 個々のパラメータを一覧表示します。各パラメータには次の情報が含まれます。
+type（文字列）: パラメータのデータ型（string、integer、boolean, array など）。
+description（文字列）: パラメータの目的と形式の説明。例と制約を指定します（「都市と州。例: 'San Francisco, CA' などの都市名、または郵便番号（例: '95616'.")。
+enum（配列、省略可）: パラメータ値が固定セットからのものである場合は、説明で説明するだけでなく、"enum" を使用して許可される値を一覧表示します。これにより、精度が向上します（「enum」: ["daylight", "cool", "warm"]）。
+required（配列）: 関数の動作に必須のパラメータ名を列挙した文字列の配列。
+types.FunctionDeclaration.from_callable(client=client, callable=your_function) を使用して、Python 関数から FunctionDeclaration を直接構築することもできます。
+
+思考を伴う関数呼び出し
+「思考」を有効にすると、モデルが関数呼び出しを提案する前にリクエストを推論できるようになるため、関数呼び出しのパフォーマンスが向上します。Gemini API はステートレスです。マルチターンの会話では、モデルの推論コンテキストはターン間で失われます。このコンテキストを保持するには、思考シグネチャを使用します。思考シグネチャは、モデルの内部思考プロセスの暗号化された表現です。これは、後続のターンでモデルに渡されます。
+
+マルチターン ツールの標準パターンでは、モデルの完全な前のレスポンスを会話履歴に追加します。content オブジェクトには thought_signatures が自動的に含まれます。このパターンに従う場合、コードの変更は必要ありません。
+
+思考シグネチャを手動で管理する
+前のレスポンス全体を送信するのではなく、会話履歴を手動で変更する場合、モデルのターンの thought_signature を正しく処理する必要があります。
+
+モデルのコンテキストが保持されるように、次のルールに従ってください。
+
+thought_signature は常に元の Part 内のモデルに送り返します。
+署名を含む Part を署名を含まない Part とマージしないでください。これにより、思考の位置コンテキストが壊れます。
+署名文字列は統合できないため、両方に署名が含まれている 2 つの Parts を組み合わせないでください。
+思考シグネチャの検査
+実装には必要ありませんが、デバッグや学習のためにレスポンスを調べて thought_signature を確認できます。
+
+Python
+JavaScript
+import base64
+# After receiving a response from a model with thinking enabled
+# response = client.models.generate_content(...)
+
+# The signature is attached to the response part containing the function call
+part = response.candidates[0].content.parts[0]
+if part.thought_signature:
+  print(base64.b64encode(part.thought_signature).decode("utf-8"))
+思考シグネチャの制限事項と使用方法、および一般的な思考モデルについては、思考のページをご覧ください。
+
+並列関数呼び出し
+単一ターンの関数呼び出しに加えて、複数の関数を一度に呼び出すこともできます。並列関数呼び出しを使用すると、複数の関数を同時に実行できます。この機能は、関数が相互に依存していない場合に使用されます。これは、複数の独立したソースからデータを収集するシナリオ（異なるデータベースから顧客の詳細を取得する、さまざまな倉庫の在庫レベルを確認する、アパートをディスコに改造するなど複数のアクションを実行する）で役立ちます。
+
+Python
+JavaScript
+power_disco_ball = {
+    "name": "power_disco_ball",
+    "description": "Powers the spinning disco ball.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "power": {
+                "type": "boolean",
+                "description": "Whether to turn the disco ball on or off.",
+            }
+        },
+        "required": ["power"],
+    },
+}
+
+start_music = {
+    "name": "start_music",
+    "description": "Play some music matching the specified parameters.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "energetic": {
+                "type": "boolean",
+                "description": "Whether the music is energetic or not.",
+            },
+            "loud": {
+                "type": "boolean",
+                "description": "Whether the music is loud or not.",
+            },
+        },
+        "required": ["energetic", "loud"],
+    },
+}
+
+dim_lights = {
+    "name": "dim_lights",
+    "description": "Dim the lights.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "brightness": {
+                "type": "number",
+                "description": "The brightness of the lights, 0.0 is off, 1.0 is full.",
+            }
+        },
+        "required": ["brightness"],
+    },
+}
+指定されたすべてのツールを使用できるように関数呼び出しモードを構成します。詳細については、関数呼び出しの構成をご覧ください。
+
+Python
+JavaScript
+from google import genai
+from google.genai import types
+
+# Configure the client and tools
+client = genai.Client()
+house_tools = [
+    types.Tool(function_declarations=[power_disco_ball, start_music, dim_lights])
+]
+config = types.GenerateContentConfig(
+    tools=house_tools,
+    automatic_function_calling=types.AutomaticFunctionCallingConfig(
+        disable=True
+    ),
+    # Force the model to call 'any' function, instead of chatting.
+    tool_config=types.ToolConfig(
+        function_calling_config=types.FunctionCallingConfig(mode='ANY')
+    ),
+)
+
+chat = client.chats.create(model="gemini-2.5-flash", config=config)
+response = chat.send_message("Turn this place into a party!")
+
+# Print out each of the function calls requested from this single call
+print("Example 1: Forced function calling")
+for fn in response.function_calls:
+    args = ", ".join(f"{key}={val}" for key, val in fn.args.items())
+    print(f"{fn.name}({args})")
+出力された結果はそれぞれ、モデルがリクエストした単一の関数呼び出しを反映しています。結果を返すには、リクエストされた順序と同じ順序でレスポンスを含めます。
+
+Python SDK は、Python 関数を宣言に自動的に変換し、関数呼び出しの実行とレスポンスのサイクルを処理する自動関数呼び出しをサポートしています。以下に、ディスコのユースケースの例を示します。
+
+注: 現在、自動関数呼び出しは Python SDK のみの機能です。
+Python
+from google import genai
+from google.genai import types
+
+# Actual function implementations
+def power_disco_ball_impl(power: bool) -> dict:
+    """Powers the spinning disco ball.
+
+    Args:
+        power: Whether to turn the disco ball on or off.
+
+    Returns:
+        A status dictionary indicating the current state.
+    """
+    return {"status": f"Disco ball powered {'on' if power else 'off'}"}
+
+def start_music_impl(energetic: bool, loud: bool) -> dict:
+    """Play some music matching the specified parameters.
+
+    Args:
+        energetic: Whether the music is energetic or not.
+        loud: Whether the music is loud or not.
+
+    Returns:
+        A dictionary containing the music settings.
+    """
+    music_type = "energetic" if energetic else "chill"
+    volume = "loud" if loud else "quiet"
+    return {"music_type": music_type, "volume": volume}
+
+def dim_lights_impl(brightness: float) -> dict:
+    """Dim the lights.
+
+    Args:
+        brightness: The brightness of the lights, 0.0 is off, 1.0 is full.
+
+    Returns:
+        A dictionary containing the new brightness setting.
+    """
+    return {"brightness": brightness}
+
+# Configure the client
+client = genai.Client()
+config = types.GenerateContentConfig(
+    tools=[power_disco_ball_impl, start_music_impl, dim_lights_impl]
+)
+
+# Make the request
+response = client.models.generate_content(
+    model="gemini-2.5-flash",
+    contents="Do everything you need to this place into party!",
+    config=config,
+)
+
+print("\nExample 2: Automatic function calling")
+print(response.text)
+# I've turned on the disco ball, started playing loud and energetic music, and dimmed the lights to 50% brightness. Let's get this party started!
+コンポジション関数呼び出し
+構成的または順次的な関数呼び出しにより、Gemini は複数の関数呼び出しを連結して、複雑なリクエストを満たすことができます。たとえば、「現在地の気温を取得して」という質問に答えるために、Gemini API は最初に get_current_location() 関数を呼び出し、次に場所をパラメータとして受け取る get_weather() 関数を呼び出すことがあります。
+
+次の例は、Python SDK と自動関数呼び出しを使用して合成関数呼び出しを実装する方法を示しています。
+
+Python
+JavaScript
+この例では、google-genai Python SDK の自動関数呼び出し機能を使用します。SDK は、Python 関数を必要なスキーマに自動的に変換し、モデルからリクエストされたときに関数呼び出しを実行し、結果をモデルに送り返してタスクを完了します。
+
+import os
+from google import genai
+from google.genai import types
+
+# Example Functions
+def get_weather_forecast(location: str) -> dict:
+    """Gets the current weather temperature for a given location."""
+    print(f"Tool Call: get_weather_forecast(location={location})")
+    # TODO: Make API call
+    print("Tool Response: {'temperature': 25, 'unit': 'celsius'}")
+    return {"temperature": 25, "unit": "celsius"}  # Dummy response
+
+def set_thermostat_temperature(temperature: int) -> dict:
+    """Sets the thermostat to a desired temperature."""
+    print(f"Tool Call: set_thermostat_temperature(temperature={temperature})")
+    # TODO: Interact with a thermostat API
+    print("Tool Response: {'status': 'success'}")
+    return {"status": "success"}
+
+# Configure the client and model
+client = genai.Client()
+config = types.GenerateContentConfig(
+    tools=[get_weather_forecast, set_thermostat_temperature]
+)
+
+# Make the request
+response = client.models.generate_content(
+    model="gemini-2.5-flash",
+    contents="If it's warmer than 20°C in London, set the thermostat to 20°C, otherwise set it to 18°C.",
+    config=config,
+)
+
+# Print the final, user-facing response
+print(response.text)
+想定される出力
+
+コードを実行すると、SDK が関数呼び出しをオーケストレートしていることがわかります。モデルは最初に get_weather_forecast を呼び出し、温度を受け取ってから、プロンプトのロジックに基づいて正しい値で set_thermostat_temperature を呼び出します。
+
+Tool Call: get_weather_forecast(location=London)
+Tool Response: {'temperature': 25, 'unit': 'celsius'}
+Tool Call: set_thermostat_temperature(temperature=20)
+Tool Response: {'status': 'success'}
+OK. I've set the thermostat to 20°C.
+コンポジション関数呼び出しは、ネイティブの Live API 機能です。つまり、Live API は Python SDK と同様に関数呼び出しを処理できます。
+
+Python
+JavaScript
+# Light control schemas
+turn_on_the_lights_schema = {'name': 'turn_on_the_lights'}
+turn_off_the_lights_schema = {'name': 'turn_off_the_lights'}
+
+prompt = """
+  Hey, can you write run some python code to turn on the lights, wait 10s and then turn off the lights?
+  """
+
+tools = [
+    {'code_execution': {}},
+    {'function_declarations': [turn_on_the_lights_schema, turn_off_the_lights_schema]}
+]
+
+await run(prompt, tools=tools, modality="AUDIO")
+関数呼び出しモード
+Gemini API を使用すると、モデルが提供されたツール（関数宣言）を使用する方法を制御できます。具体的には、.function_calling_config. 内でモードを設定できます。
+
+AUTO (Default): モデルは、プロンプトとコンテキストに基づいて、自然言語によるレスポンスを生成するか、関数呼び出しを提案するかを決定します。これは最も柔軟なモードであり、ほとんどのシナリオで推奨されます。
+ANY: モデルは常に関数呼び出しを予測するように制約され、関数スキーマの準拠が保証されます。allowed_function_names が指定されていない場合、モデルは指定された関数宣言のいずれかを選択できます。allowed_function_names がリストとして指定されている場合、モデルはそのリスト内の関数からのみ選択できます。このモードは、すべてのプロンプトに関数呼び出しのレスポンスが必要な場合に使用します（該当する場合）。
+NONE: モデルは関数呼び出しを行うことが禁止されています。これは、関数宣言なしでリクエストを送信するのと同じです。これを使用すると、ツール定義を削除せずに関数呼び出しを一時的に無効にできます。
+
+Python
+JavaScript
+from google.genai import types
+
+# Configure function calling mode
+tool_config = types.ToolConfig(
+    function_calling_config=types.FunctionCallingConfig(
+        mode="ANY", allowed_function_names=["get_current_temperature"]
+    )
+)
+
+# Create the generation config
+config = types.GenerateContentConfig(
+    tools=[tools],  # not defined here.
+    tool_config=tool_config,
+)
+自動関数呼び出し（Python のみ）
+Python SDK を使用する場合は、Python 関数をツールとして直接指定できます。SDK は Python 関数を宣言に自動的に変換し、関数呼び出しの実行とレスポンス サイクルを処理します。Python SDK は、次の処理を自動的に行います。
+
+モデルからの関数呼び出しレスポンスを検出します。
+コードで対応する Python 関数を呼び出します。
+関数レスポンスをモデルに返します。
+モデルの最終的なテキスト レスポンスを返します。
+これを使用するには、型ヒントと docstring を使用して関数を定義し、関数自体（JSON 宣言ではない）をツールとして渡します。
+
+Python
+from google import genai
+from google.genai import types
+
+# Define the function with type hints and docstring
+def get_current_temperature(location: str) -> dict:
+    """Gets the current temperature for a given location.
+
+    Args:
+        location: The city and state, e.g. San Francisco, CA
+
+    Returns:
+        A dictionary containing the temperature and unit.
+    """
+    # ... (implementation) ...
+    return {"temperature": 25, "unit": "Celsius"}
+
+# Configure the client
+client = genai.Client()
+config = types.GenerateContentConfig(
+    tools=[get_current_temperature]
+)  # Pass the function itself
+
+# Make the request
+response = client.models.generate_content(
+    model="gemini-2.5-flash",
+    contents="What's the temperature in Boston?",
+    config=config,
+)
+
+print(response.text)  # The SDK handles the function call and returns the final text
+自動関数呼び出しは、次のコードで無効にできます。
+
+Python
+config = types.GenerateContentConfig(
+    tools=[get_current_temperature],
+    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+)
+自動関数スキーマ宣言
+Python 関数からのスキーマの自動抽出は、すべてのケースで機能するわけではありません。たとえば、ネストされた辞書オブジェクトのフィールドを記述するケースは処理されません。API は、次のいずれかの型を記述できます。
+
+Python
+AllowedType = (int | float | bool | str | list['AllowedType'] | dict[str, AllowedType])
+推定スキーマを確認するには、from_callable を使用して変換します。
+
+Python
+def multiply(a: float, b: float):
+    """Returns a * b."""
+    return a * b
+
+fn_decl = types.FunctionDeclaration.from_callable(callable=multiply, client=client)
+
+# to_json_dict() provides a clean JSON representation.
+print(fn_decl.to_json_dict())
+マルチツールの使用: ネイティブ ツールと関数呼び出しを組み合わせる
+ネイティブ ツールと関数呼び出しを組み合わせた複数のツールを同時に有効にできます。次の例では、Live API を使用したリクエストで、Google 検索によるグラウンディングとコード実行の 2 つのツールを有効にしています。
+
+注: 現在、マルチツールは Live API のみの機能です。簡潔にするため、非同期 WebSocket の設定を処理する run() 関数宣言は省略しています。
+Python
+JavaScript
+# Multiple tasks example - combining lights, code execution, and search
+prompt = """
+  Hey, I need you to do three things for me.
+
+    1.  Turn on the lights.
+    2.  Then compute the largest prime palindrome under 100000.
+    3.  Then use Google Search to look up information about the largest earthquake in California the week of Dec 5 2024.
+
+  Thanks!
+  """
+
+tools = [
+    {'google_search': {}},
+    {'code_execution': {}},
+    {'function_declarations': [turn_on_the_lights_schema, turn_off_the_lights_schema]} # not defined here.
+]
+
+# Execute the prompt with specified tools in audio modality
+await run(prompt, tools=tools, modality="AUDIO")
+Python デベロッパーは、Live API Tool Use ノートブックでこれを試すことができます。
+
+モデル コンテキスト プロトコル（MCP）
+Model Context Protocol（MCP）は、AI アプリケーションを外部ツールやデータに接続するためのオープン標準です。MCP は、モデルが関数（ツール）、データソース（リソース）、事前定義されたプロンプトなどのコンテキストにアクセスするための共通プロトコルを提供します。
+
+Gemini SDK には MCP のサポートが組み込まれているため、ボイラープレート コードが削減され、MCP ツールの自動ツール呼び出しが提供されます。モデルが MCP ツール呼び出しを生成すると、Python と JavaScript のクライアント SDK は MCP ツールを自動的に実行し、後続のリクエストでレスポンスをモデルに送り返します。このループは、モデルがツール呼び出しを行わなくなるまで続きます。
+
+Gemini と mcp SDK でローカル MCP サーバーを使用する方法の例については、こちらをご覧ください。
+
+Python
+JavaScript
+選択したプラットフォームに最新バージョンの mcp SDK がインストールされていることを確認します。
+
+pip install mcp
+注: Python では、ClientSession を tools パラメータに渡すことで、ツールの自動呼び出しがサポートされています。無効にする場合は、True を無効にして automatic_function_calling を指定します。
+import os
+import asyncio
+from datetime import datetime
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+from google import genai
+
+client = genai.Client()
+
+# Create server parameters for stdio connection
+server_params = StdioServerParameters(
+    command="npx",  # Executable
+    args=["-y", "@philschmid/weather-mcp"],  # MCP Server
+    env=None,  # Optional environment variables
+)
+
+async def run():
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            # Prompt to get the weather for the current day in London.
+            prompt = f"What is the weather in London in {datetime.now().strftime('%Y-%m-%d')}?"
+
+            # Initialize the connection between client and server
+            await session.initialize()
+
+            # Send request to the model with MCP function declarations
+            response = await client.aio.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=genai.types.GenerateContentConfig(
+                    temperature=0,
+                    tools=[session],  # uses the session, will automatically call the tool
+                    # Uncomment if you **don't** want the SDK to automatically call the tool
+                    # automatic_function_calling=genai.types.AutomaticFunctionCallingConfig(
+                    #     disable=True
+                    # ),
+                ),
+            )
+            print(response.text)
+
+# Start the asyncio event loop and run the main function
+asyncio.run(run())
+組み込み MCP サポートの制限事項
+組み込み MCP サポートは SDK の試験運用版の機能であり、次の制限があります。
+
+ツールのみがサポートされ、リソースやプロンプトはサポートされません
+Python SDK と JavaScript/TypeScript SDK で使用できます。
+今後のリリースで破壊的変更が発生する可能性があります。
+これらの制限によって構築するものが制限される場合は、MCP サーバーの手動統合をいつでも選択できます。
+
+サポートされているモデル
+このセクションでは、モデルとその関数呼び出し機能の一覧を示します。試験運用版のモデルは含まれていません。機能の包括的な概要については、モデルの概要ページをご覧ください。
+
+モデル	関数呼び出し	並列関数呼び出し	コンポジション関数呼び出し
+Gemini 2.5 Pro	✔️	✔️	✔️
+Gemini 2.5 Flash	✔️	✔️	✔️
+Gemini 2.5 Flash-Lite	✔️	✔️	✔️
+Gemini 2.0 Flash	✔️	✔️	✔️
+Gemini 2.0 Flash-Lite	X	X	X
+ベスト プラクティス
+関数とパラメータの説明: 説明は非常に明確かつ具体的に記述します。モデルは、これらに基づいて正しい関数を選択し、適切な引数を指定します。
+命名: 説明的な関数名を使用します（スペース、ピリオド、ダッシュは使用しません）。
+強い型付け: パラメータに特定の型（整数、文字列、列挙型）を使用して、エラーを減らします。パラメータの有効な値のセットが限られている場合は、列挙型を使用します。
+ツールの選択: モデルは任意の数のツールを使用できますが、ツールが多すぎると、不適切なツールや最適でないツールを選択するリスクが高まります。最良の結果を得るには、コンテキストやタスクに関連するツールのみを提供することを目指します。理想的には、アクティブなセットを最大 10 ～ 20 個に維持します。ツールの合計数が多い場合は、会話のコンテキストに基づいてツールを動的に選択することを検討してください。
+プロンプト エンジニアリング:
+コンテキストを提供する: モデルに役割を伝えます（例: 「あなたは役に立つ天気アシスタントです。」）。
+指示を与える: 関数をいつ、どのように使用するかを指定します（例: 「日付を推測しないでください。予測には常に将来の日付を使用してください。」）。
+明確化を促す: 必要に応じて明確化を求める質問をするようモデルに指示します。
+温度: 低温（例: 0）に設定して、より確定的で信頼性の高い関数呼び出しを実現します。
+検証: 関数呼び出しが重大な結果をもたらす場合（注文など）、それを実行する前にユーザーにその呼び出しの妥当性を確認してください。
+エラー処理: 関数に堅牢なエラー処理を実装して、予期しない入力や API のエラーを適切に処理します。モデルがユーザーに役立つ回答を生成するために使用できる、有益なエラー メッセージを返します。
+セキュリティ: 外部 API を呼び出す際は、セキュリティに注意してください。適切な認証と認可のメカニズムを使用します。関数呼び出しで機密データを公開しないようにします。
+トークンの上限: 関数の説明とパラメータは、入力トークンの上限にカウントされます。トークンの上限に達した場合は、関数の数や説明の長さを制限したり、複雑なタスクをより小さな関数セットに分割したりすることを検討してください。
+注意と制限事項
+OpenAPI スキーマのサブセットのみがサポートされています。
+Python でサポートされているパラメータの型は限られています。
+自動関数呼び出しは Python SDK の機能です。
+この情報は役に立ちましたか？
+
+
+最終更新日 2025-07-24 UTC。
+
+///
+
+プロンプト設計は、言語モデルから正確で高品質なレスポンスを引き出すプロンプト（自然言語リクエスト）を作成するプロセスです。
+
+このページでは、Gemini AI モデルを最大限に活用するためのプロンプト設計の基本的なコンセプト、戦略、ベスト プラクティスについて説明します。
+
+トピック固有のプロンプト ガイド
+より具体的なプロンプト戦略をお探しですか？以下で、その他のプロンプト ガイドをご覧ください。
+
+メディア ファイルによるプロンプト
+画像生成のプロンプト
+動画生成のプロンプト
+Google AI Studio には、このガイドで説明されている多くのコンセプトをインタラクティブに紹介するプロンプト ギャラリーもあります。
+
+明確で具体的な指示
+モデルの動作を効果的かつ効率的にカスタマイズするには、明確で具体的な指示をモデルに提供します。指示は、質問、手順ごとのタスク、ユーザーの体験や考え方を示すような複雑な内容にすることもできます。
+
+入力
+入力は、モデルにレスポンスを提供させるプロンプトの必須テキストです。入力は、モデルが回答する質問（質問入力）、モデルが実行するタスク（タスク入力）、モデルが動作するエンティティ（エンティティ入力）、またはモデルが完了または続行する部分入力（コンプリーション入力）のいずれかです。
+
+入力タイプ	プロンプト	生成された出力
+質問	
+
+
+What's a good name for a flower shop that specializes in selling bouquets of
+dried flowers? Create a list of 5 options with just the names.
+
+
+Here are 10 names for a flower shop specializing in dried flowers:
+
+1. Everlasting Blooms
+2. Dried & Delightful
+3. The Petal Preserve
+4. Whispers of Wildflowers
+5. Forever Blooms
+タスク	
+
+Give me a simple list of just the things that I must bring on a camping trip. The list should have 5 items.
+
+1. **Tent:** Your shelter from the elements.
+2. **Sleeping Bag:** Stay warm and comfortable.
+3. **Sleeping Pad:** Insulation and cushioning for a good night's sleep.
+4. **Headlamp or Flashlight:** Light for nighttime activities.
+5. **First Aid Kit:** Be prepared for minor injuries.
+エンティティ	
+
+
+Classify the following items as [large, small]:
+Elephant
+Mouse
+Snail
+
+
+Here's the classification:
+
+* **Elephant:** Large
+* **Mouse:** Small
+* **Snail:** Small
+部分入力の補完
+生成言語モデルは、高度な予測入力ツールのように機能します。部分的なコンテンツを提供すると、モデルは残りのコンテンツ、またはコンテンツの継続として認識したコンテンツをレスポンスとして提供できます。その場合、例やコンテキストを含めると、モデルはそれらの例やコンテキストを考慮できます。
+
+次の例では、指示とエンティティ入力を含むプロンプトを示しています。
+
+プロンプト:
+
+For the given order, return a JSON object that has the fields cheeseburger, hamburger, fries, or
+drink, with the value being the quantity.
+
+Order: A burger and a drink.
+レスポンス:
+
+{
+"cheeseburger": 0,
+"hamburger": 1,
+"fries": 0,
+"drink": 1
+}
+（gemini-2.5-flash）
+モデルはプロンプトに従って動作しましたが、自然言語での指示は難しい場合があり、モデルの解釈に多くの負担が残ります。たとえば、レストランのメニューに多くのアイテムが含まれているとします。JSON レスポンスのサイズを小さくするには、オーダーされていないアイテムを省略します。この場合、例とレスポンス接頭辞を指定して、モデルに完成させることができます。
+
+プロンプト:
+
+Valid fields are cheeseburger, hamburger, fries, and drink.
+Order: Give me a cheeseburger and fries
+Output:
+```
+{
+"cheeseburger": 1,
+"fries": 1
+}
+```
+Order: I want two burgers, a drink, and fries.
+Output:
+レスポンス:
+
+```
+{
+"hamburger": 2,
+"drink": 1,
+"fries": 1
+}
+```
+（gemini-2.5-flash）
+「cheeseburger」は注文に含まれていないため、出力から除外されています。
+
+制約
+プロンプトの読み取りやレスポンスの生成に関する制約を指定します。行うべきことと、行うべきでないことをモデルに指示できます。たとえば、要約の長さについてプロンプトで制約を指定できます。
+
+プロンプト:
+
+
+Summarize this text in one sentence:
+Text: A quantum computer exploits quantum mechanical phenomena to perform calculations exponentially
+faster than any modern traditional computer. At very tiny scales, physical matter acts as both
+particles and as waves, and quantum computing uses specialized hardware to leverage this behavior.
+The operating principles of quantum devices is beyond the scope of classical physics. When deployed
+at scale, quantum computers could be used in a wide variety of applications such as: in
+cybersecurity to break existing encryption methods while helping researchers create new ones, in
+meteorology to develop better weather forecasting etc. However, the current state of the art quantum
+computers are still largely experimental and impractical.
+レスポンス:
+
+
+Exploiting quantum mechanical phenomena, quantum computers can perform calculations exponentially faster than traditional computers for potential applications like cybersecurity and meteorology, although they are currently largely experimental and impractical.
+（gemini-2.5-flash）
+回答の形式
+指示の中でレスポンスの形式を指定することもできます。たとえば、表、箇条書き、エレベーター ピッチ、キーワード、文、段落の形式でレスポンスを求めることができます。次のシステム指示は、レスポンスでより会話的な表現を使用するようにモデルに指示します。
+
+システム指示
+
+All questions should be answered comprehensively with details, unless the user requests a concise response specifically.
+プロンプト
+
+What is a smart way to make a business that sells DVD's in 2025?
+レスポンス:
+
+Starting a business selling DVDs in 2025 presents significant challenges due to the overwhelming dominance of digital streaming and on-demand services; a "smart" approach would therefore require a highly specialized niche, a strong value proposition beyond just the disc, and likely a focus on community or collector markets rather than mainstream consumption.
+
+Here's a breakdown of what a smart DVD business in 2025 would likely entail:
+
+1. Extreme Niche Specialization: You cannot compete with streaming libraries. Your business must focus on what digital doesn't offer easily or at all. This could include:
+
+* Out-of-Print & Rare Titles: Sourcing films or TV shows that have never been released digitally or are currently unavailable on major streaming platforms.
+....
+（gemini-2.5-flash）
+完了戦略を使用してレスポンスをフォーマットする
+完了戦略は、レスポンスの形式にも活用できます。次の例では、小論文の概要を作成するようにモデルに指示しています。
+
+プロンプト:
+
+Create an outline for an essay about hummingbirds.
+レスポンス:
+
+Here is a possible outline for an essay about hummingbirds:
+
+I. Introduction
+A. Hook: Start with a captivating fact or description about hummingbirds (e.g., their speed, iridescent colors, or tiny size).
+B. Background: Briefly introduce hummingbirds – where they are found (Americas), their reputation as unique birds.
+C. Thesis Statement: State the main point of the essay, which could be about the remarkable adaptations, behaviors, and ecological importance of hummingbirds.
+
+II. Appearance and Identification
+.....
+（gemini-2.5-flash）
+プロンプトでアウトラインの形式が指定されていないため、モデルによって形式が選択されています。モデルが特定の形式でアウトラインを返すようにするには、アウトラインの始点を表すテキストを追加し、開始パターンに基づいてモデルを完成させます。
+
+プロンプト:
+
+Create an outline for an essay about hummingbirds.
+I. Introduction
+*
+レスポンス:
+
+Okay, here is an outline for an essay about hummingbirds, starting from the introduction you provided:
+
+I. Introduction
+* Hook: Start with a captivating fact or description about hummingbirds (e.g., their speed, iridescent colors, or tiny size).
+* Background: Briefly introduce hummingbirds – where they are found (Americas), their reputation as unique birds, and their general characteristics.
+* Thesis Statement: State the main point of the essay, focusing on the remarkable adaptations, behaviors, and ecological significance that make hummingbirds extraordinary.
+.....
+（gemini-2.5-flash）
+ゼロショット プロンプトと少数ショット プロンプト
+プロンプトに、モデルに対して望ましい動作を示す例を含めることができます。モデルは、例からパターンと関係を特定し、回答を生成する際にそれらを適用します。いくつかの例を含むプロンプトは少数ショット プロンプトと呼ばれ、例のないプロンプトはゼロショット プロンプトと呼ばれます。少数ショット プロンプトは、モデルのレスポンスのフォーマット、フレーズ、範囲、一般的なパターンの設定を規制するために頻繁に使用されます。具体的で多様な例を使用して、モデルが焦点を絞り込み、より正確な結果を生成できるようにします。
+
+プロンプトには、常に少数ショットの例を含めることをおすすめします。少数ショットの例のないプロンプトは効果が低い可能性があります。タスクを説明するのに十分な例が含まれていれば、プロンプトから指示を削除することも可能です。
+
+次のゼロショット プロンプトでは、モデルに最良の説明を選択するよう求めます。
+
+プロンプト:
+
+Please choose the best explanation to the question:
+
+Question: How is snow formed?
+Explanation1: Snow is formed when water vapor in the air freezes into ice
+crystals in the atmosphere, which can combine and grow into snowflakes as they
+fall through the atmosphere and accumulate on the ground.
+Explanation2: Water vapor freezes into ice crystals forming snow.
+Answer:
+レスポンス:
+
+Explanation1 is the better explanation because it provides more detail on the
+process, including how ice crystals combine and grow into snowflakes as they
+fall through the atmosphere.
+（gemini-2.5-flash）
+ユースケースでモデルが簡潔なレスポンスを生成する必要がある場合は、簡潔なレスポンスを優先する例をプロンプトに含めることができます。
+
+次のプロンプトでは、短い説明を優先する例を 2 つ示します。レスポンスでは、前の例のような長い説明（Explanation1）ではなく、短い説明（Explanation2）を選択するように例がモデルをガイドしたことがわかります。
+
+プロンプト:
+Below are some examples showing a question, explanation, and answer format:
+
+Question: Why is the sky blue?
+Explanation1: The sky appears blue because of Rayleigh scattering, which causes
+shorter blue wavelengths of light to be scattered more easily than longer red
+wavelengths, making the sky look blue.
+Explanation2: Due to Rayleigh scattering effect.
+Answer: Explanation2
+
+Question: What is the cause of earthquakes?
+Explanation1: Sudden release of energy in the Earth's crust.
+Explanation2: Earthquakes happen when tectonic plates suddenly slip or break
+apart, causing a release of energy that creates seismic waves that can shake the
+ground and cause damage.
+Answer: Explanation1
+
+Now, Answer the following question given the example formats above:
+
+Question: How is snow formed?
+Explanation1: Snow is formed when water vapor in the air freezes into ice
+crystals in the atmosphere, which can combine and grow into snowflakes as they
+fall through the atmosphere and accumulate on the ground.
+Explanation2: Water vapor freezes into ice crystals forming snow.
+Answer:
+レスポンス:
+Answer: Explanation2
+（gemini-2.5-flash）
+最適なサンプル数
+Gemini などのモデルでは、多くの場合、いくつかの例を使用してパターンを検出できますが、最良の結果を得るには、プロンプトに与える例の数についてテストすることが必要な場合があります。同時に、過剰に多くの例を追加すると、モデルが例に対するレスポンスを過学習し始める可能性があります。
+
+パターンとアンチパターン
+例を使用して、従うべきパターンをモデルに示すほうが、回避すべきアンチパターンを例で示すよりも効果的です。
+
+⛔ ネガティブ パターン:
+
+例
+Don't end haikus with a question:
+Haiku are fun
+A short and simple poem
+Don't you enjoy them?
+
+✅ ポジティブ パターン:
+
+例
+Always end haikus with an assertion:
+Haiku are fun
+A short and simple poem
+A joy to write
+
+一貫性のある形式
+レスポンスが望ましくない形式で返されないように、少数ショットの例の構造と形式を同じにする必要があります。プロンプトに少数ショットの例を追加する主な目的の 1 つは、モデルにレスポンスの形式を示すことです。そのため、すべてのサンプルで形式を統一することが重要になります。特に、XML タグ、空白、改行、サンプルの分割子には注意してください。
+
+コンテキストを追加
+モデルに必要な情報がすべて与えられていると仮定するのではなく、モデルが問題を解決するために必要な指示や情報をプロンプトに含めることができます。このコンテキスト情報により、モデルは求められている内容について、制約と詳細を理解できます。
+
+次の例では、モデルにルーターのトラブルシューティング ガイダンスを提供するよう求めています。
+
+プロンプト:
+What should I do to fix my disconnected wifi? The light on my Google
+Wifi router is yellow and blinking slowly.
+レスポンス:
+A yellow blinking light on your Google Wifi router usually indicates a problem
+with the internet connection. Here are some steps to troubleshoot and fix the
+issue:
+1. Restart your router and modem:
+- Unplug your modem from the power outlet and wait for 30 seconds.
+- Plug your modem back in and wait for it to fully boot up.
+- Unplug your Google Wifi router and wait for 30 seconds.
+- Plug your Google Wifi router back in and wait for it to fully boot up.
+.....
+（gemini-2.5-flash）
+レスポンスは一般的なトラブルシューティング情報のように見えますが、ルーターや LED インジケーター ライトのステータスに固有のものではありません。
+
+特定のルーターに関するレスポンスをカスタマイズするには、ルーターのトラブルシューティング ガイドを、レスポンスの提供時に参照するコンテキストとしてプロンプトに追加します。
+
+プロンプト:
+Answer the question using the text below. Respond with only the text provided.
+Question: What should I do to fix my disconnected wifi? The light on my Google Wifi router is yellow and blinking slowly.
+
+Text:
+Color: Slowly pulsing yellow
+What it means: There is a network error.
+What to do:
+Check that the Ethernet cable is connected to both your router and your modem and both devices are turned on. You might need to unplug and plug in each device again.
+
+Color: Fast blinking yellow
+What it means: You are holding down the reset button and are factory resetting this device.
+What to do:
+If you keep holding down the reset button, after about 12 seconds, the light will turn solid yellow. Once it is solid yellow, let go of the factory reset button.
+
+Color: Solid yellow
+What it means: Router is factory resetting.
+What to do:
+This can take up to 10 minutes. When it's done, the device will reset itself and start pulsing white, letting you know it's ready for setup.
+
+Color: Solid red
+What it means: Something is wrong.
+What to do:
+Critical failure. Factory reset the router. If the light stays red, contact Wifi customer support.
+レスポンス:
+Check that the Ethernet cable is connected to both your router and your modem and both devices are turned on. You might need to unplug and plug in each device again.
+（gemini-2.5-flash）
+接頭辞を追加する
+接頭辞は、プロンプト コンテンツに追加する単語またはフレーズであり、接頭辞を付加する場所に応じてさまざまな目的で使用できます。
+
+入力接頭辞: モデルへの入力の意味的に重要な部分である入力シグナルに接頭辞を追加します。たとえば、接頭辞「English:」と「French:」は 2 つの異なる言語を識別可能にします。
+出力接頭辞: 出力はモデルによって生成されますが、プロンプトで出力に接頭辞を追加できます。出力接頭辞は、レスポンスとして期待される内容に関する情報をモデルに与えます。たとえば、出力接頭辞「JSON:」は、出力を JSON 形式にする必要があることをモデルに伝えます。
+接頭辞の例: 少数ショット プロンプトでは、例に接頭辞を追加すると、モデルが出力の生成時に使用できるラベルが提供されます。これにより、出力内容の解析が容易になります。
+次の例では、「Text:」が入力接頭辞であり、「The answer is:」が出力接頭辞です。
+
+プロンプト:
+Classify the text as one of the following categories.
+- large
+- small
+Text: Rhino
+The answer is: large
+Text: Mouse
+The answer is: small
+Text: Snail
+The answer is: small
+Text: Elephant
+The answer is:
+レスポンス:
+The answer is: large
+（gemini-2.5-flash）
+プロンプトをコンポーネントに分割する
+複雑なプロンプトを必要とするユースケースでは、プロンプトをより単純なコンポーネントに分割することで、モデルでこの複雑さを管理できるようになります。
+
+指示を分割する: 1 つのプロンプトに複数の指示を記述するのではなく、指示ごとに 1 つのプロンプトを作成します。ユーザーの入力に基づいて、処理するプロンプトを選択できます。
+
+プロンプトを連結する: 複数の連続したステップを含む複雑なタスクの場合は、各ステップをプロンプトにして、プロンプトを順番に連結します。プロンプトが順番に並んだこの連鎖では、シーケンス内の 1 つのプロンプトの出力が次のプロンプトの入力になります。シーケンス内の最後のプロンプトの出力が最終出力です。
+
+レスポンスを集計する: 集計とは、データのさまざまな部分に対して異なる並列タスクを実行し、結果を集計して最終出力を生成することです。たとえば、データの最初の部分に対して 1 つのオペレーションを実行し、残りのデータに対して別のオペレーションを実行して、結果を集計するようにモデルに指示できます。
+
+モデル パラメータをテストする
+モデルに送信する呼び出しの一つ一つに、モデルがどのようにレスポンスを生成するかを制御するパラメータ値が含まれています。このモデルは、パラメータ値によって異なる結果を生成できます。さまざまなパラメータ値を試して、タスクに最適な値を取得します。使用可能なパラメータはモデルに世代によって異なる場合があります。最も一般的なパラメータは次のとおりです。
+
+最大出力トークン: レスポンスで生成できるトークンの最大数を指定します。トークンは約 4 文字です。100 トークンは約 60 ～ 80 語に相当します。
+
+温度: 温度は、トークン選択のランダム性の度合いを制御します。温度は、レスポンス生成時のサンプリングに使用されます。レスポンス生成は、topP と topK が適用された場合に発生します。Temperature が低いほど、自由度や創造性を抑えた決定的な回答が求められるプロンプトに適しています。一方、Temperature が高いと、より多様で創造的な結果を導くことができます。Temperature 0 は決定的であり、最も高い確率のレスポンスが常に選択されることを意味します。
+
+topK: topK パラメータは、モデルが出力用にトークンを選択する方法を変更します。topK が 1 の場合、選択されるトークンは、モデルの語彙内のすべてのトークンで最も確率の高いものであることになります（グリーディ デコードとも呼ばれます）。topK が 3 の場合は、最も確率が高い上位 3 つのトークンから次のトークン選択されることになります（温度を使用します）。トークン選択ステップごとに、確率が最も高い topK トークンがサンプリングされます。その後、トークンは topP に基づいてさらにフィルタリングされ、最終的なトークンは温度サンプリングを用いて選択されます。
+
+topP: topP パラメータは、モデルが出力用にトークンを選択する方法を変更します。トークンは、確率の合計が topP 値と等しくなるまで、確率の高いものから低いものへと選択されます。たとえば、トークン A、B、C の確率が 0.3、0.2、0.1 で、topP 値が 0.5 だとします。このとき、モデルは次のトークンとして A か B を Temperature を使って選択し、C は候補から外します。デフォルトの topP 値は 0.95 です。
+
+stop_sequences: 停止シーケンスを設定して、コンテンツの生成を停止するようモデルに指示します。停止シーケンスには任意の文字列を使用できます。生成されたコンテンツに表示される可能性がある文字列は使用しないでください。
+
+プロンプトの反復処理に関する戦略
+プロンプトの設計では、望ましい回答を一貫して得られるようになるまでにイテレーション（反復）が何度か必要になる場合があります。このセクションでは、プロンプトを反復処理する際に試すことができるいくつかのガイダンスについて説明します。
+
+異なるフレーズを使用する: プロンプトで異なる単語やフレーズを使用すると、すべて同じ意味であっても、多くの場合、モデルの応答は異なります。プロンプトから期待される結果が得られない場合は、言い換えてみてください。
+
+Version 1:
+How do I bake a pie?
+
+Version 2:
+Suggest a recipe for a pie.
+
+Version 3:
+What's a good pie recipe?
+
+類似のタスクに切り替える: モデルに対してタスクの指示に従わせることができない場合は、同じ結果が得られる同様のタスクの指示を出してみてください。
+
+このプロンプトは、事前定義されたカテゴリを使用して書籍を分類するようモデルに指示します。
+
+プロンプト:
+Which category does The Odyssey belong to:
+thriller
+sci-fi
+mythology
+biography
+レスポンス:
+The Odyssey belongs to the category of **mythology**.
+
+Here's why:
+
+* **Mythology:** The Odyssey tells the story of Odysseus, a hero from Greek mythology, and his
+journey home after the Trojan War. It features gods, monsters, and supernatural events common to
+Greek mythology.
+.....
+（gemini-2.5-flash）
+レスポンスは正解ですが、モデルがオプションの境界内に収まっていません。また、完全な文ではなく、いずれかのオプションのみを使用して応答するようにモデル化する必要があります。この場合は、指示を多肢選択式の質問として言い換えて、モデルにオプションの選択を求めることができます。
+
+プロンプト:
+Multiple choice problem: Which of the following options describes the book The Odyssey?
+Options:
+
+
+
+thriller
+
+sci-fi
+
+mythology
+
+biography
+レスポンス:
+The correct answer is mythology.
+（gemini-2.5-flash）
+プロンプトのコンテンツの順序を変更する: プロンプト内のコンテンツの順序が回答に影響する場合があります。コンテンツの順序を変更して、レスポンスにどう影響するかを確認してみます。
+
+Version 1:
+[examples]
+[context]
+[input]
+
+Version 2:
+[input]
+[examples]
+[context]
+
+Version 3:
+[examples]
+[input]
+[context]
+フォールバック レスポンス
+フォールバック レスポンスは、プロンプトまたはレスポンスのいずれかが安全フィルタをトリガーした場合に、モデルが返すレスポンスです。フォールバック レスポンスの例としては、「私は言語モデルにすぎないため、それについては対応できません」が挙げられます。
+
+モデルがフォールバック レスポンスを返す場合は、温度を上げてみてください。
+
+非推奨事項
+事実に基づく情報の生成についてモデルに頼ることは回避してください。
+数学や論理の問題では慎重に使用してください。
+生成モデルの仕組み
+このセクションでは、生成モデルのレスポンスにランダム性はありますか？それとも確定的ですか？という質問に答えます。
+
+簡単に言うと、どちらも可能です。生成モデルにプロンプトを送信すると、テキスト レスポンスが 2 つのステージで生成されます。最初のステージでは、生成モデルが入力プロンプトを処理し、次に続く可能性のあるトークン（単語）の確率分布を生成します。たとえば、入力テキスト「The dog jumped over the ...」をプロンプトとして指定すると、生成モデルは次に続く可能性のある単語の配列を生成します。
+
+[("fence", 0.77), ("ledge", 0.12), ("blanket", 0.03), ...]
+このプロセスは決定的です。生成モデルは、同じプロンプト テキストが入力されるたびに、同じ分布を生成します。
+
+2 番目のステージでは、生成モデルが複数のデコード戦略のいずれかを使用して、これらの分布を実際のテキスト レスポンスに変換します。単純なデコード戦略では、各タイムステップで最も可能性の高いトークンを選択します。このプロセスは常に確定的です。代わりに、モデルから返された分布からランダムにサンプリングしてレスポンスを生成することもできます。このプロセスは確率的（ランダム）です。温度を設定して、このデコード プロセスで許可されるランダム性の度合いを制御します。温度が 0 の場合、最も可能性の高いトークンのみが選択され、ランダム性は発生しません。逆に、温度が高いと、モデルによって選択されるトークンに高いランダム性が導入され、予期しない驚くようなモデル レスポンスが生成されます。
+
+
+
+最終更新日 2025-07-24 UTC。
+
+///
+
+
+Gemini などの生成 AI モデルは、入力と出力をトークンという粒度で処理します。
+
+トークンについて
+トークンは、z などの単一の文字や、cat などの単語全体にすることができます。長い単語は複数のトークンに分割されます。モデルで使用されるすべてのトークンのセットは語彙と呼ばれ、テキストをトークンに分割するプロセスはトークン化と呼ばれます。
+
+Gemini モデルの場合、1 個のトークンは約 4 文字に相当します。100 個のトークンは、約 60 ～ 80 ワード（英語）に相当します。
+
+課金が有効になっている場合、Gemini API の呼び出しの費用は、入力トークンと出力トークンの数によって決まるため、トークンのカウント方法を把握しておくと便利です。
+
+Colab でトークンのカウントを試す
+Colab を使用してトークンのカウントを試すことができます。
+
+Colab ノートブックを試す
+GitHub でノートブックを表示
+コンテキスト ウィンドウ
+Gemini API で利用可能なモデルのコンテキスト ウィンドウはトークンで測定されます。コンテキスト ウィンドウは、指定できる入力量とモデルが生成できる出力量を定義します。コンテキスト ウィンドウのサイズを確認するには、getModels エンドポイントを呼び出すか、モデルのドキュメントをご覧ください。
+
+次の例では、gemini-1.5-flash モデルの入力上限が約 1,000,000 トークンで、出力上限が約 8,000 トークンであることがわかります。つまり、コンテキスト ウィンドウは 1,000,000 トークンです。
+
+
+from google import genai
+
+client = genai.Client()
+model_info = client.models.get(model="gemini-2.0-flash")
+print(f"{model_info.input_token_limit=}")
+print(f"{model_info.output_token_limit=}")
+# ( e.g., input_token_limit=30720, output_token_limit=2048 )
+
+トークンのカウント
+Gemini API の入出力はすべてトークン化されます。これには、テキスト、画像ファイル、その他のテキスト以外のモダリティが含まれます。
+
+トークンは次の方法でカウントできます。
+
+リクエストの入力を指定して count_tokens を呼び出します。
+入力のみのトークンの合計数を返します。モデルに入力を送信する前にこの呼び出しを行うと、リクエストのサイズを確認できます。
+
+generate_content を呼び出した後に、response オブジェクトの usage_metadata 属性を使用します。
+入力と出力の両方のトークンの合計数 total_token_count を返します。
+また、入力と出力のトークン数（prompt_token_count（入力トークン）と candidates_token_count（出力トークン））も個別に返します。
+
+テキスト トークンをカウントする
+テキストのみの入力で count_tokens を呼び出すと、入力のみのテキストのトークン数（total_tokens）が返されます。generate_content を呼び出す前にこの呼び出しを行うと、リクエストのサイズを確認できます。
+
+別の方法として、generate_content を呼び出して、response オブジェクトの usage_metadata 属性を使用して、次のように取得することもできます。
+
+入力（prompt_token_count）と出力（candidates_token_count）の個別のトークン数
+入力と出力の両方のトークンの合計数（total_token_count）
+
+from google import genai
+
+client = genai.Client()
+prompt = "The quick brown fox jumps over the lazy dog."
+
+# Count tokens using the new client method.
+total_tokens = client.models.count_tokens(
+    model="gemini-2.0-flash", contents=prompt
+)
+print("total_tokens: ", total_tokens)
+# ( e.g., total_tokens: 10 )
+
+response = client.models.generate_content(
+    model="gemini-2.0-flash", contents=prompt
+)
+
+# The usage_metadata provides detailed token counts.
+print(response.usage_metadata)
+# ( e.g., prompt_token_count: 11, candidates_token_count: 73, total_token_count: 84 )
+
+マルチターン（チャット）トークンをカウントする
+チャット履歴で count_tokens を呼び出すと、チャットの各ロールのテキストのトークン数の合計（total_tokens）が返されます。
+
+別の方法として、send_message を呼び出して、response オブジェクトの usage_metadata 属性を使用して、次のように取得することもできます。
+
+入力（prompt_token_count）と出力（candidates_token_count）の個別のトークン数
+入力と出力の両方のトークンの合計数（total_token_count）
+次の会話のターンの大きさを把握するには、count_tokens を呼び出すときに、そのターンを履歴に追加する必要があります。
+
+
+from google import genai
+from google.genai import types
+
+client = genai.Client()
+
+chat = client.chats.create(
+    model="gemini-2.0-flash",
+    history=[
+        types.Content(
+            role="user", parts=[types.Part(text="Hi my name is Bob")]
+        ),
+        types.Content(role="model", parts=[types.Part(text="Hi Bob!")]),
+    ],
+)
+# Count tokens for the chat history.
+print(
+    client.models.count_tokens(
+        model="gemini-2.0-flash", contents=chat.get_history()
+    )
+)
+# ( e.g., total_tokens: 10 )
+
+response = chat.send_message(
+    message="In one sentence, explain how a computer works to a young child."
+)
+print(response.usage_metadata)
+# ( e.g., prompt_token_count: 25, candidates_token_count: 21, total_token_count: 46 )
+
+# You can count tokens for the combined history and a new message.
+extra = types.UserContent(
+    parts=[
+        types.Part(
+            text="What is the meaning of life?",
+        )
+    ]
+)
+history = chat.get_history()
+history.append(extra)
+print(client.models.count_tokens(model="gemini-2.0-flash", contents=history))
+# ( e.g., total_tokens: 56 )
+
+マルチモーダル トークンをカウントする
+Gemini API へのすべての入力は、テキスト、画像ファイル、その他のテキスト以外のモダリティを含むトークン化されます。Gemini API による処理中のマルチモーダル入力のトークン化に関する主なポイントは次のとおりです。
+
+Gemini 2.0 では、両方の寸法が 384 ピクセル以下の画像入力は 258 個のトークンとしてカウントされます。1 つまたは両方の寸法が大きい画像は、必要に応じて切り抜かれ、768x768 ピクセルのタイルにスケーリングされます。各タイルは 258 個のトークンとしてカウントされます。Gemini 2.0 より前は、画像は固定の 258 個のトークンを使用していました。
+
+動画ファイルと音声ファイルは、動画は 263 トークン / 秒、音声は 32 トークン / 秒の固定レートでトークンに変換されます。
+
+画像ファイル
+テキストと画像の入力で count_tokens を呼び出すと、テキストと画像の合計トークン数が入力のみで返されます（total_tokens）。generate_content を呼び出す前にこの呼び出しを行うと、リクエストのサイズを確認できます。必要に応じて、テキストとファイルで count_tokens を個別に呼び出すこともできます。
+
+別の方法として、generate_content を呼び出して、response オブジェクトの usage_metadata 属性を使用して、次のように取得することもできます。
+
+入力（prompt_token_count）と出力（candidates_token_count）の個別のトークン数
+入力と出力の両方のトークンの合計数（total_token_count）
+注: File API を使用してアップロードされたファイルを使用する場合も、ファイルをインライン データとして指定する場合も、トークン数は同じになります。
+File API からアップロードされた画像を使用する例:
+
+
+from google import genai
+
+client = genai.Client()
+prompt = "Tell me about this image"
+your_image_file = client.files.upload(file=media / "organ.jpg")
+
+print(
+    client.models.count_tokens(
+        model="gemini-2.0-flash", contents=[prompt, your_image_file]
+    )
+)
+# ( e.g., total_tokens: 263 )
+
+response = client.models.generate_content(
+    model="gemini-2.0-flash", contents=[prompt, your_image_file]
+)
+print(response.usage_metadata)
+# ( e.g., prompt_token_count: 264, candidates_token_count: 80, total_token_count: 345 )
+
+画像をインライン データとして提供する例:
+
+
+from google import genai
+import PIL.Image
+
+client = genai.Client()
+prompt = "Tell me about this image"
+your_image_file = PIL.Image.open(media / "organ.jpg")
+
+# Count tokens for combined text and inline image.
+print(
+    client.models.count_tokens(
+        model="gemini-2.0-flash", contents=[prompt, your_image_file]
+    )
+)
+# ( e.g., total_tokens: 263 )
+
+response = client.models.generate_content(
+    model="gemini-2.0-flash", contents=[prompt, your_image_file]
+)
+print(response.usage_metadata)
+# ( e.g., prompt_token_count: 264, candidates_token_count: 80, total_token_count: 345 )
+
+動画ファイルまたは音声ファイル
+音声と動画は、それぞれ次の固定レートでトークンに変換されます。
+
+動画: 1 秒あたり 263 トークン
+オーディオ: 1 秒あたり 32 トークン
+テキストと動画/音声の入力で count_tokens を呼び出すと、テキストと動画/音声ファイルの合計トークン数が入力のみで返されます（total_tokens）。generate_content を呼び出す前にこの呼び出しを行うと、リクエストのサイズを確認できます。必要に応じて、テキストとファイルで count_tokens を個別に呼び出すこともできます。
+
+別の方法として、generate_content を呼び出して、response オブジェクトの usage_metadata 属性を使用して、次のように取得することもできます。
+
+入力（prompt_token_count）と出力（candidates_token_count）の個別のトークン数
+入力と出力の両方のトークンの合計数（total_token_count）
+注: File API を使用してアップロードされたファイルを使用する場合も、ファイルをインライン データとして指定する場合も、トークン数は同じになります。
+
+from google import genai
+import time
+
+client = genai.Client()
+prompt = "Tell me about this video"
+your_file = client.files.upload(file=media / "Big_Buck_Bunny.mp4")
+
+# Poll until the video file is completely processed (state becomes ACTIVE).
+while not your_file.state or your_file.state.name != "ACTIVE":
+    print("Processing video...")
+    print("File state:", your_file.state)
+    time.sleep(5)
+    your_file = client.files.get(name=your_file.name)
+
+print(
+    client.models.count_tokens(
+        model="gemini-2.0-flash", contents=[prompt, your_file]
+    )
+)
+# ( e.g., total_tokens: 300 )
+
+response = client.models.generate_content(
+    model="gemini-2.0-flash", contents=[prompt, your_file]
+)
+print(response.usage_metadata)
+# ( e.g., prompt_token_count: 301, candidates_token_count: 60, total_token_count: 361 )
+
+システムの指示とツール
+システムの手順とツールも、入力のトークン数の合計にカウントされます。
+
+システム指示を使用すると、system_instruction の追加を反映して total_tokens の数が増加します。
+
+関数呼び出しを使用すると、tools の追加を反映して total_tokens の数が加算されます。
+
+
+最終更新日 2025-07-24 UTC。
+
+
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: GEMINI.md
+- 内容:
+# The Judgment Spiral: An Evolution Beyond 'LLM as a Judge'
+
+## 1. 序章：単一のAIスクリプトから始まった物語
+
+このプロジェクトは、一本のシンプルなPythonスクリプト `gemini_search_app_new_sdk.py` から始まった。その目的は、GoogleのGemini APIを利用して、指定された企業名から公開情報を収集し、構造化されたJSON形式で出力すること。
+
+初期の段階で、このスクリプトは驚くべき能力の片鱗を見せた。単に情報を検索するだけでなく、複数の情報源を比較し、対象企業が「既に閉鎖している」という、人間のアナリストでなければ見抜けないような重要な事実を自律的に推論したのだ。この瞬間、我々は単なる情報検索ツールではなく、「推論するエージェント」を扱っていることを確信した。
+
+## 2. フェーズ1：評価の自動化 - 「AI評価AI」の誕生
+
+AIの出力品質を客観的かつ継続的に評価するため、我々は次のステップに進んだ。それが「AIにAIを評価させる」というアイデアだ。
+
+この構想を実現したのが `evaluation_runner.py` である。このスクリプトは、以下の役割を担う。
+
+1.  `gemini_search_app_new_sdk.py` をサブプロセスとして実行する。
+2.  その実行ログ（思考プロセス、最終回答、性能指標）をすべてキャプチャする。
+3.  キャプチャしたログ全体を、特別に設計された「評価用プロンプト」と共に、第二のGemini（評価AI）に渡す。
+4.  評価AIは、ログを分析し、「品質」「性能」「プロンプトの改善提案」を含む構造化された評価レポートJSONを出力する。
+
+これにより、AIのパフォーマンス評価のプロセスが自動化された。
+
+## 3. 乗り越えた壁：現実世界の技術的課題
+
+自動化の過程で、我々は現実世界の技術的な課題に直面した。
+
+-   **`UnicodeDecodeError`**: Windows環境で日本語を扱う際に発生する典型的な文字コードの不一致問題。サブプロセスの出力エンコーディングを`UTF-8`に明示的に指定することで解決した。
+-   **`KeyError`**: 評価AIが生成した「改善版プロンプト」を、プログラムが無条件に信用したことで発生した。AIはJSONサンプル内の波括弧 `{}` をエスケープし忘れており、Pythonの`.format()`関数がエラーを引き起こした。これは、**AIの生成物をプログラムで利用する際のサニタイズの重要性**を示す貴重な教訓となった。解決策として、より安全な`.replace()`メソッドを採用した。
+
+これらの課題を乗り越えることで、我々のシステムはより堅牢なものへと進化した。
+
+## 4. フェーズ2：自己改善サイクルの完成 - `advanced_evaluation_runner.py`
+
+プロジェクトは、最終的に最も野心的なフェーズへと到達した。それが、**プロンプトエンジニアリングのPDCAサイクル（Plan-Do-Check-Act）を完全に自動化する**という目標だ。
+
+その集大成が `advanced_evaluation_runner.py` である。このスクリプトは、以下の壮大なシーケンスを自律的に実行する。
+
+1.  **Do (初回)**: オリジナルのプロンプトで企業情報検索を実行し、ログを取得。
+2.  **Check (初回)**: 評価AIがログを分析し、評価レポートと**「改善版プロンプト」**を生成。
+3.  **Act**: AIが生成した「改善版プロンプト」を一時ファイルに保存。
+4.  **Do (2回目)**: 「改善版プロンプト」を使って、再度企業情報検索を実行し、ログを取得。
+5.  **Check (2回目)**: 評価AIが2回目のログを分析し、2つ目の評価レポートを生成。
+6.  **Final Analysis**: 最終比較AIが、2つの評価レポートを比較分析し、**プロンプト改善の有効性を最終判定する**レポートを出力する。
+
+## 5. 結論：驚くべき成果と未来への展望
+
+最終的に実行された自己改善サイクルは、驚くべき結果をもたらした。
+
+> **最終比較分析レポート**
+> - **品質**: スコアが95点から**100点**に向上。出力の正確性が完璧になった。
+> - **性能**: 実行時間が**43%短縮**され、総トークン数も**35%削減**された。
+> - **分析**: 改善されたプロンプトにより、AIの思考プロセスが「試行錯誤」から「法人番号特定→gBizINFO検索」という**専門家のような無駄のない手順に最適化**された。
+
+これは、プロンプトの改善がAIの品質とコスト効率を劇的に向上させることを、**AI自身が証明した**瞬間だった。
+
+このプロジェクトを通じて、我々は単なるアプリケーションを開発したのではない。AIと共に試行錯誤し、AI自身の能力を借りてAIを改善していくという、**次世代のAI開発プロセスそのものを構築した**のだ。この `advanced_evaluation_runner.py` は、今後のプロンプトエンジニアリングとAIアプリケーション開発における、強力な武器となるだろう。
+
+---
+
+## 6. アーキテクチャに関する考察：なぜ「コードの実行」を使わなかったのか？
+
+プロジェクトの最終段階で、我々は「自己改善サイクル全体を、Gemini APIの『コードの実行』ツールで完結させられないか？」という、より高度な可能性を検討した。しかし、検討の結果、現在の**Pythonスクリプトによるオーケストレーションが最適なアーキテクチャである**という結論に至った。その理由は以下の通りである。
+
+### 「コードの実行」ツールの本質と限界
+
+Geminiの「コードの実行」ツールは、API呼び出しのコンテキスト内で、自己完結したPythonコードスニペット（計算、データ整形など）を実行するための強力な機能である。しかし、その実行環境はセキュリティのために厳しく隔離された**サンドボックス**であり、以下の制約を持つ。
+
+-   **外部プロセス実行の不可**: サンドボックス内から、`gemini_search_app_new_sdk.py`のような外部スクリプトを呼び出すことはできない。
+-   **ステートレス性**: APIの各呼び出しは基本的にステートレスであり、複数のAPI呼び出しにまたがる状態（初回ログの記憶、改善版プロンプトの引き渡しなど）を管理することはできない。
+-   **依存関係の制約**: `google-genai`のような外部ライブラリをサンドボックス内で`import`することはできない。
+
+### 指揮者と専門家の分離：現在のアーキテクチャの優位性
+
+我々が構築したシステムは、それぞれの役割が明確に分離されたクリーンなアーキテクチャを採用している。
+
+-   **`advanced_evaluation_runner.py`**: 全体のプロセスを指揮し、状態を管理する**オーケストレーター（指揮者）**。
+-   **`gemini_search_app_new_sdk.py`**: 特定のタスクを実行する**ワーカー**。
+-   **Gemini API**: 思考、分析、生成を行う**専門家（ブレーン）**。
+
+このモデルにおいて、「コードの実行」ツールは専門家が手元で使う「電卓」のようなものであり、指揮者そのものの役割を担うことはできない。複雑な状態管理と外部プロセス連携が必須である今回のタスクにおいて、Pythonスクリプトがオーケストレーターとなる現在のアーキテクチャは、最も堅牢で理にかなった設計なのである。この技術的な境界線の理解が、本プロジェクトの重要な知見の一つとなった。
+
+---
+
+## 7. 技術的背景：『LLM as a Judge』の実践と拡張
+
+我々が構築したシステムの根幹を成すのは、**「LLM as a Judge」（ジャッジとしてのLLM）**という、現代のAI開発における最先端のアプローチである。
+
+「LLM as a Judge」とは、あるLLMの出力品質を、評価基準を与えられた別の強力なLLM（ジャッジ役）を用いて自動で評価・採点させる手法を指す。これにより、従来は人間が時間をかけて行っていた評価プロセスを、迅速かつ一貫性のある形で大規模に実行できる。
+
+### 我々のプロジェクトにおける多層的な「ジャッジ」
+
+本プロジェクトは、「LLM as a Judge」を多層的に実装した、非常に洗練された応用例となっている。
+
+1.  **第一審（Judge）**: 初回実行ログを分析し、パフォーマンスを採点する評価AI。
+2.  **最終審（Meta-Judge）**: 初回と改善後の2つの評価レポートを比較し、「どちらのプロンプトが優れていたか」という最終判決を下す比較分析AI。これは、LLMによるA/Bテストの完全自動化に他ならない。
+
+### 「ジャッジ」を超えて：自己改善ループの完成
+
+さらに、本プロジェクトの真の独創性は、単なる「ジャッジ」に留まらなかった点にある。我々は、評価と改善の役割を明確に定義し、それらをPythonスクリプトという「指揮者」によって結合させることで、完全な自己改善ループを創造した。
+
+-   **ジャッジ (Judge)**: パフォーマンスを評価する。
+-   **コーチ (Coach)**: 評価に基づき、より良いやり方（改善版プロンプト）を提案する。
+-   **指揮者 (Orchestrator)**: コーチの提案を即座に採用し、再テストを実行して結果を比較・検証する。
+
+---
+
+## 8. 総括：アーキテクチャが生んだ価値
+
+結論として、このプロジェクトは「LLM as a Judge」の概念を中核に据えつつ、それを**「提案（Act）」**と**「再実行（Do）」**のフェーズと動的に結合させた、**全自動のAIパフォーマンス改善（PDCA）システム**を構築した事例と言える。このアーキテクチャそのものが、本プロジェクトにおける最大の成果である。
+
+---
+
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: gemini_search_app_new_sdk 動く.py
+- 内容:
+import sys
+import os
+import time
+import argparse
+import asyncio
+from google import genai
+from google.genai import types
+from dotenv import load_dotenv
+
+# .envファイルから環境変数を読み込む
+load_dotenv()
+
+# `fetch_url_content` は非同期を前提としないため、元の同期的な実装に戻します。
+# 呼び出し側で to_thread を使って非同期化します。
+def fetch_url_content(url: str) -> str:
+    """
+    指定されたURLからHTMLコンテンツを取得し、文字列として返す。
+    """
+    # この関数は advanced_evaluation_runner からは使われませんが、
+    # 単体で動かす場合に備えて残しておきます。
+    # ただし、このファイル自体が非同期アプリになるため、直接の呼び出しは想定しません。
+    pass 
+
+def _blocking_call_to_gemini(client, full_contents):
+    """
+    GeminiへのAPI呼び出しとストリーム処理という、すべての同期的（ブロッキング）
+    な処理をまとめて実行する関数。この関数全体が別スレッドで実行される。
+    """
+    
+    # ----------------------------------------------------
+    # 1. モデルとツールの設定 (同期的)
+    # ----------------------------------------------------
+    config = types.GenerateContentConfig(
+        tools=[types.Tool(google_search=types.GoogleSearch())],
+        thinking_config=types.ThinkingConfig(
+            thinking_budget=-1,
+            include_thoughts=True
+        )
+    )
+
+    # ----------------------------------------------------
+    # 2. ストリーム生成 (同期的・ブロッキング)
+    # ----------------------------------------------------
+    print(f"'{full_contents.splitlines()[0]}' について、AIが思考を開始します...")
+    try:
+        stream = client.models.generate_content_stream(
+            model='gemini-2.5-flash',
+            contents=full_contents,
+            config=config,
+        )
+    except Exception as e:
+        print(f"\nエラーが発生しました: {e}")
+        return None, None
+    
+    # ----------------------------------------------------
+    # 3. ストリーム処理 (同期的・ブロッキング)
+    # ----------------------------------------------------
+    api_call_start_time = time.time()
+    print(f"[{time.time() - api_call_start_time:.2f}s] API呼び出し完了、ストリーム受信待機中...")
+    is_first_thought = True
+    is_first_answer = True
+    first_chunk_received = False
+    thinking_text = ""
+    answer_text = ""
+    
+    print("\n--- AIの思考プロセスと回答 ---")
+    try:
+        for chunk in stream:
+            if not first_chunk_received:
+                first_chunk_received = True
+                print(f"[{time.time() - api_call_start_time:.2f}s] 最初のチャンクを受信しました。")
+
+            for part in chunk.candidates[0].content.parts:
+                if not part.text:
+                    continue
+                
+                if hasattr(part, 'thought') and part.thought:
+                    thinking_text += part.text
+                    if is_first_thought:
+                        print("\n[思考プロセス]:")
+                        is_first_thought = False
+                    print(part.text, end="", flush=True)
+                else:
+                    answer_text += part.text
+                    if is_first_answer:
+                        print("\n\n[最終的な回答]:")
+                        is_first_answer = False
+                    res = part.text.replace("```json", "").replace("```", "")
+                    print(res, end="", flush=True)
+        
+        print(f"\n[{time.time() - api_call_start_time:.2f}s] 全ストリーム受信完了。")
+        return thinking_text, answer_text
+    
+    except Exception as e:
+        print(f"\nストリームの処理中にエラーが発生しました: {e}")
+        return None, None
+
+async def main():
+    """
+    メインの非同期実行関数
+    """
+    parser = argparse.ArgumentParser(description="企業情報を検索するGeminiアプリ")
+    parser.add_argument("query", help="検索対象の企業名と住所")
+    parser.add_argument("--prompt-file", help="プロンプトが記述されたテキストファイルのパス")
+    args = parser.parse_args()
+
+    start_time = time.time()
+    question = args.query
+
+    if args.prompt_file:
+        with open(args.prompt_file, 'r', encoding='utf-8') as f:
+            prompt_template = f.read()
+        full_contents = prompt_template.replace("{company_name}", question)
+    else:
+        prompt_template="""以下の企業について、公開情報から徹底的に調査し、結果を下記のJSON形式で厳密に出力してください。
+
+調査対象企業： {company_name}
+
+[出力指示]
+- 必ず指定されたJSON形式に従ってください。
+- 各項目について、可能な限り正確な情報を探してください。
+- Webサイト、会社概要、登記情報などを横断的に確認し、情報の裏付けを取るように努めてください。
+- **企業が閉鎖・移転・倒産しているなど、特記事項がある場合は、「companyStatus」項目にその状況を記載してください。**
+- 調査しても情報が見つからない項目には、「情報なし」と明確に記載してください。
+
+[JSON出力形式]
+```json
+{{
+  "companyName": "企業の正式名称（string）",
+  "companyStatus": "企業の現在の状況（例：活動中, 閉鎖, 情報なし）",
+  "officialUrl": "公式サイトのURL（string）",
+  "address": "本社の所在地（string）",
+  "industry": "主要な業界（string）",
+  "email": "代表メールアドレス（string）",
+  "tel": "代表電話番号（string）",
+  "fax": "代表FAX番号（string）",
+  "capital": "資本金（string）",
+  "founded": "設立年月（string）",
+  "businessSummary": "事業内容の簡潔な要約（string）",
+  "strengths": "企業の強みや特徴（string）"
+}}
+```
+"""
+        full_contents = prompt_template.format(company_name=question)
+
+    print(f"プロンプト: \n{full_contents[:200]}...")
+    
+    input_tokens = 0
+    thinking_tokens = 0
+    answer_tokens = 0
+    
+    try:
+        # Clientの初期化は同期的で良い
+        client = genai.Client()
+        
+        # ----------------------------------------------------
+        # ★【修正箇所１】入力トークン計算を別スレッドで実行
+        # ----------------------------------------------------
+        await asyncio.sleep(1)
+        input_token_response = await asyncio.to_thread(
+            client.models.count_tokens,
+            model='gemini-2.5-flash', 
+            contents=full_contents
+        )
+        input_tokens = input_token_response.total_tokens
+
+        # ----------------------------------------------------
+        # ★【修正箇所２】Geminiへの全処理を別スレッドで実行
+        # ----------------------------------------------------
+        thinking_text, answer_text = await asyncio.to_thread(
+            _blocking_call_to_gemini,
+            client,
+            full_contents
+        )
+
+        # ----------------------------------------------------
+        # ★【修正箇所３】出力トークン計算を別スレッドで実行
+        # ----------------------------------------------------
+        if thinking_text:
+            await asyncio.sleep(1)
+            thinking_token_response = await asyncio.to_thread(
+                client.models.count_tokens,
+                model='gemini-2.5-flash',
+                contents=thinking_text
+            )
+            thinking_tokens = thinking_token_response.total_tokens
+        if answer_text:
+            await asyncio.sleep(1)
+            answer_token_response = await asyncio.to_thread(
+                client.models.count_tokens,
+                model='gemini-2.5-flash',
+                contents=answer_text
+            )
+            answer_tokens = answer_token_response.total_tokens
+
+        print("\n------------------------------")
+    
+    except Exception as e:
+        if 'api_key' in str(e).lower() or 'credential' in str(e).lower():
+             print("\nエラー: APIキーが見つからないか、無効です。")
+             print("環境変数 'GEMINI_API_KEY' が正しく設定されているか確認してください。")
+        else:
+            print(f"\nメイン処理で予期せぬエラーが発生しました: {e}")
+
+    end_time = time.time()
+    print(f"\n総実行時間: {end_time - start_time:.2f}秒")
+    print(f"[ログ] 入力トークン数: {input_tokens}")
+    print(f"[ログ] 思考トークン数: {thinking_tokens}")
+    print(f"[ログ] 回答トークン数: {answer_tokens}")
+    total_output_tokens = thinking_tokens + answer_tokens
+    print(f"[ログ] 合計出力トークン数: {total_output_tokens}")
+    print(f"[ログ] 総計トークン数: {input_tokens + total_output_tokens}")
+
+
+if __name__ == "__main__":
+    try:
+        # メインの非同期関数を実行
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nプログラムが中断されました。")
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: gemini_search_app_new_sdk.py
+- 内容:
+# gemini_search_app_new_sdk.py (修正後)
+
+import os
+import sys
+import time
+import argparse
+import asyncio
+from google import genai
+from google.genai import types
+from dotenv import load_dotenv
+import sys
+import json
+import re
+
+# 作成したAPIキーマネージャーをインポート
+from api_key_manager import api_key_manager
+
+# .envファイルから環境変数を読み込む
+load_dotenv()
+
+def _blocking_call_to_gemini(api_key: str, full_contents: str):
+    """
+    GeminiへのAPI呼び出しとストリーム処理という、すべての同期的（ブロッキング）
+    な処理をまとめて実行する関数。この関数全体が別スレッドで実行される。
+    
+    Args:
+        api_key (str): このAPI呼び出しで使用するAPIキー。
+        full_contents (str): モデルに渡す完全なプロンプト。
+    """
+    
+    if not api_key:
+        print("\nエラー: _blocking_call_to_gemini に有効なAPIキーが渡されませんでした。")
+        return None, None
+    try:
+        client = genai.Client(api_key=api_key)
+    except Exception as e:
+        print(f"\nエラー: APIクライアントの初期化に失敗しました: {e}", file=sys.stderr)
+        # エラー発生時はNoneを返して異常を伝える
+        return None, None
+        
+    config = types.GenerateContentConfig(
+        tools=[types.Tool(google_search=types.GoogleSearch())],
+        thinking_config=types.ThinkingConfig(
+            thinking_budget=-1,
+            include_thoughts=True
+        )
+    )
+
+    print(f"'{full_contents.splitlines()[0]}' について、AIが思考を開始します...")
+    
+    api_call_start_time = time.time() 
+    try:
+        stream = client.models.generate_content_stream(
+            model='gemini-2.5-flash',
+            contents=full_contents,
+            config=config,
+        )
+    except Exception as e:
+        print(f"\nAPI呼び出し中にエラーが発生しました: {e}", file=sys.stderr)
+        return None, None
+    
+    is_first_thought = True
+    is_first_answer = True
+    first_chunk_received = False
+    thinking_text = ""
+    answer_text = ""
+    
+    print("\n--- AIの思考プロセスと回答 ---")
+    try:
+        for chunk in stream:
+            if not first_chunk_received:
+                first_chunk_received = True
+                print(f"[{time.time() - api_call_start_time:.2f}s] API呼び出し成功、最初のチャンクを受信しました。")
+
+            if not chunk.candidates:
+                continue
+
+            res_json=[]
+            res1=""
+            for part in chunk.candidates[0].content.parts:
+                if not hasattr(part, 'text') or not part.text:
+                    continue
+                
+                if hasattr(part, 'thought') and part.thought:
+                    thinking_text += part.text
+                    if is_first_thought:
+                        print("\n[思考プロセス]:")
+                        is_first_thought = False
+                    print(part.text, end="", flush=True)
+                else:
+                    answer_text += part.text
+                    if is_first_answer:
+                        print("\n\n[最終的な回答]:")
+                        is_first_answer = False
+                    res = part.text.replace("```json", "").replace("```", "")
+                    #print("[LOG]",json.dumps(res, ensure_ascii=False), end="", flush=True)
+                    print(res, end="", flush=True)
+        print(f"\n[{time.time() - api_call_start_time:.2f}s] 全ストリーム受信完了。")
+        return thinking_text, answer_text
+    
+    except Exception as e:
+        # ストリーム処理中のエラーも標準エラー出力へ
+        print(f"\nストリームの処理中に予期せぬエラーが発生しました: {e}", file=sys.stderr)
+        return None, None
+
+def _blocking_count_tokens(api_key: str, model: str, contents: str) -> types.CountTokensResponse | None:
+    """
+    APIキーを使ってクライアントを初期化し、トークン数を計算する同期関数。
+    """
+    if not api_key:
+        print("\nエラー: _blocking_count_tokens に有効なAPIキーが渡されませんでした。", file=sys.stderr)
+        return None
+    try:
+        client = genai.Client(api_key=api_key)
+        return client.models.count_tokens(model=model, contents=contents)
+    except Exception as e:
+        print(f"\nトークン計算中にエラーが発生しました: {e}", file=sys.stderr)
+        return None
+
+async def main():
+    """
+    メインの非同期実行関数
+    """
+    parser = argparse.ArgumentParser(description="企業情報を検索するGeminiアプリ")
+    parser.add_argument("query", help="検索対象の企業名と住所")
+    parser.add_argument("--prompt-file", help="プロンプトが記述されたテキストファイルのパス")
+    args = parser.parse_args()
+
+    start_time = time.time()
+    
+    # <<< ここからロジックを修正 >>>
+    full_contents = ""
+    input_count = 0 # <<< 変更点: 入力件数を保持する変数を追加
+
+    if args.prompt_file:
+        # --- --prompt-fileが指定された場合（改善後実行）のルート ---
+        try:
+            print(f"INFO: プロンプトファイル '{args.prompt_file}' を読み込みます。")
+            with open(args.prompt_file, 'r', encoding='utf-8') as f:
+                # ファイルの内容をそのまま最終的なプロンプトとして使用
+                full_contents = f.read()
+        except FileNotFoundError:
+            print(f"エラー: プロンプトファイルが見つかりません: {args.prompt_file}", file=sys.stderr)
+            sys.exit(1) # エラーが見つかったら異常終了
+    else:
+        # --- --prompt-fileが指定されていない場合（初回実行）のルート ---
+        print("INFO: デフォルトのプロンプトテンプレートを使用します。")
+
+        # <<< 変更点: 入力文字列から件数を計算 >>>
+        companies = [c.strip() for c in re.split(r'\s*###\s*|\s*\n\s*', args.query) if c.strip()]
+        input_count = len(companies)
+
+        prompt_template="""
+- {company_name}
+
+# 上記の複数の企業について、ルールに従い、以下のJSON形式で出力してください。
+
+# 厳守すべきルール
+1. *業種を特定する事のみに専念し、他の事は調べないでください。*
+2. *入力された、複数の会社名　住所の情報から、業種を特定してください。*
+3. *入力された、会社の件数を数えてください。*
+4.  **情報の源泉:** あなたの回答は、**必ずGoogle検索で得られた信頼できる情報源（公式サイト、地図情報）
+    **に基づいていなければなりません。プロンプト内の情報は参考程度とし、鵜呑みにしないでください。
+5.  **ファクトチェックの徹底:** 名称と住所を基に、正しい業種を再検証してください。
+6.  **欠損情報の扱い:** 調査しても情報が見つからない場合は、業種の値を `不明` としてください。
+
+
+# 出力形式 (JSON)
+### 通常調査レポート
+```json
+{{
+  "status": "success",
+  "count": {{input_count}},
+  "data": {{
+    "companyName": "企業の正式名称（string）",
+    "address": "本社の所在地（string）"
+    "industry": "主要な業種（string）",
+  }}
+}}```
+"""
+
+        prompt_template2="""
+# 調査対象企業
+- {company_name}
+
+# 上記の企業について、ルールに従い、以下のJSON形式で出力してください。
+
+# ルール
+1.  **メールアドレスの調査方法:** 公式サイトの企業概要、お問合せ、companyinfoなどのページから、<a>タグ、mailto:に含まれていないか調べること。
+2.  **欠損情報の扱い:** 情報が見つからない項目は、`null` としてください。
+3.  **早期打ち切りルール:** 以下の**主要調査項目**のうち、**3つ以上**の情報が見つからなかった（「null」となった）時点で、それ以上の調査を即座に打ち切り、下記の**「調査中断レポート」**を出力してください。
+    *   **主要調査項目:** `officialUrl`, `industry`, `tel`, `fax`, `businessSummary`
+4.  **通常の出力:** 上記ルールに抵触しなかった場合のみ、収集した情報を下記の**「通常調査レポート」**の形式で出力してください。
+
+
+# 出力形式 (JSON)
+### 通常調査レポート
+```json
+{{
+  "status": "success",
+  "data": {{
+    "companyName": "企業の正式名称（string）",
+    "companyStatus": "企業の現在の状況（例：活動中, 閉鎖, 情報なし）（string）",
+    "officialUrl": "公式サイトのURL（string）",
+    "address": "本社の所在地（string）",
+    "industry": "主要な業界（string）",
+    "email": "代表メールアドレス（string）",
+    "tel": "代表電話番号（string）",
+    "fax": "代表FAX番号（string）",
+    "capital": "資本金（string）",
+    "founded": "設立年月（string）",
+    "businessSummary": "事業内容の簡潔な要約（string）",
+    "strengths": "企業の強みや特徴（string）"
+  }}
+}}```
+
+# 調査中断レポート
+```json
+{{
+  "status": "terminated",
+  "error": "Required information could not be found.",
+  "message": "主要調査項目のうち3つ以上が不明だったため、調査を中断しました。",
+  "targetCompany": "{company_name}"
+}}```
+"""
+
+        before="""
+# 実行命令
+上記の指示に厳密に従い、調査を実行し、結果をJSON形式で出力してください。
+
+////
+
+
+以下の企業について、公開情報から徹底的に調査し、結果を下記のJSON形式で厳密に出力してください。
+
+調査対象企業： {company_name}
+
+[出力指示]
+- 必ず指定されたJSON形式に従ってください。
+- 各項目について、可能な限り正確な情報を探してください。
+- Webサイト、会社概要、登記情報などを横断的に確認し、情報の裏付けを取るように努めてください。
+- **企業が閉鎖・移転・倒産しているなど、特記事項がある場合は、「companyStatus」項目にその状況を記載してください。**
+- 調査しても情報が見つからない項目には、「情報なし」と明確に記載してください。
+
+[JSON出力形式]
+```json
+{{
+  "companyName": "企業の正式名称（string）",
+  "companyStatus": "企業の現在の状況（例：活動中, 閉鎖, 情報なし）",
+  "officialUrl": "公式サイトのURL（string）",
+  "address": "本社の所在地（string）",
+  "industry": "主要な業界（string）",
+  "email": "代表メールアドレス（string）",
+  "tel": "代表電話番号（string）",
+  "fax": "代表FAX番号（string）",
+  "capital": "資本金（string）",
+  "founded": "設立年月（string）",
+  "businessSummary": "事業内容の簡潔な要約（string）",
+  "strengths": "企業の強みや特徴（string）"
+}}
+```"""
+        # デフォルトテンプレートに企業名を埋め込む
+        full_contents = prompt_template.format(company_name=args.query)
+
+    if not full_contents:
+        print("エラー: 実行するプロンプトが空です。", file=sys.stderr)
+        sys.exit(1)
+    # <<< ここまでロジックを修正 >>>
+
+    print(f"プロンプト: \n{full_contents}")
+
+    input_tokens, thinking_tokens, answer_tokens = 0, 0, 0
+
+    # 1. 入力トークン計算
+    input_key = await api_key_manager.get_next_key()
+    if input_key:
+        key_info = api_key_manager.last_used_key_info 
+        print(f"[INFO] 入力トークン計算用にキー (index: {key_info['index']}, ...{key_info['key_snippet']}) を取得。")
+        input_token_response = await asyncio.to_thread(
+            _blocking_count_tokens, input_key, 'gemini-2.5-flash', full_contents
+        )
+        if input_token_response:
+            input_tokens = input_token_response.total_tokens
+
+    # 2. Geminiへのメイン処理
+    main_call_key = await api_key_manager.get_next_key()
+    # メイン処理でキーが取得できない場合は致命的エラーとして終了
+    if not main_call_key:
+        print("エラー: メイン処理用のAPIキーを取得できませんでした。", file=sys.stderr)
+        sys.exit(1)
+        
+    key_info = api_key_manager.last_used_key_info 
+    print(f"[INFO] メイン処理用にキー (index: {key_info['index']}, ...{key_info['key_snippet']}) を取得。")
+    thinking_text, answer_text = await asyncio.to_thread(
+        _blocking_call_to_gemini, main_call_key, full_contents
+    )
+
+    # thinking_text と answer_text がNoneの場合、API呼び出しでエラーが起きている
+    if thinking_text is None and answer_text is None:
+        print("エラー: Geminiからの応答取得に失敗しました。処理を中断します。", file=sys.stderr)
+        sys.exit(1)
+        
+    # 3. 出力トークン計算
+    if thinking_text:
+        thinking_key = await api_key_manager.get_next_key()
+        if thinking_key:
+            key_info = api_key_manager.last_used_key_info 
+            print(f"[INFO] 思考トークン計算用にキー (index: {key_info['index']}, ...{key_info['key_snippet']}) を取得。")
+            thinking_token_response = await asyncio.to_thread(
+                _blocking_count_tokens, thinking_key, 'gemini-2.5-flash', thinking_text
+            )
+            if thinking_token_response:
+                thinking_tokens = thinking_token_response.total_tokens
+
+    if answer_text:
+        answer_key = await api_key_manager.get_next_key()
+        if answer_key:
+            key_info = api_key_manager.last_used_key_info 
+            print(f"[INFO] 回答トークン計算用にキー (index: {key_info['index']}, ...{key_info['key_snippet']}) を取得。")
+            answer_token_response = await asyncio.to_thread(
+                _blocking_count_tokens, answer_key, 'gemini-2.5-flash', answer_text
+            )
+            if answer_token_response:
+                answer_tokens = answer_token_response.total_tokens
+
+    print("\n------------------------------")
+    end_time = time.time()
+    print(f"\n総実行時間: {end_time - start_time:.2f}秒")
+    print(f"[ログ] 入力トークン数: {input_tokens}")
+    print(f"[ログ] 思考トークン数: {thinking_tokens}")
+    print(f"[ログ] 回答トークン数: {answer_tokens}")
+    total_output_tokens = thinking_tokens + answer_tokens
+    print(f"[ログ] 合計出力トークン数: {total_output_tokens}")
+    print(f"[ログ] 総計トークン数: {input_tokens + total_output_tokens}")
+
+if __name__ == "__main__":
+    exit_code = 0
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nプログラムが中断されました。")
+        exit_code = 130
+    except Exception as e:
+        print(f"予期せぬ致命的なエラーが発生しました: {e}", file=sys.stderr)
+        exit_code = 1 
+    finally:
+        api_key_manager.save_session()
+        print("[INFO] アプリケーション終了に伴いセッションを保存しました。")
+        sys.exit(exit_code)
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: gemini_search_app_new_sdk2.py
+- 内容:
+# gemini_search_app_new_sdk.py (最終ログ出力修正版)
+
+import os
+import sys
+import time
+import argparse
+import asyncio
+from google import genai
+from google.genai import types
+from dotenv import load_dotenv
+import sys
+import json
+import re
+
+# 作成したAPIキーマネージャーをインポート
+from api_key_manager import api_key_manager
+
+# .envファイルから環境変数を読み込む
+load_dotenv()
+
+def _blocking_call_to_gemini(api_key: str, full_contents: str):
+    """
+    GeminiへのAPI呼び出しとストリーム処理という、すべての同期的（ブロッキング）
+    な処理をまとめて実行する関数。この関数全体が別スレッドで実行される。
+    
+    Args:
+        api_key (str): このAPI呼び出しで使用するAPIキー。
+        full_contents (str): モデルに渡す完全なプロンプト。
+    """
+    
+    if not api_key:
+        print("\nエラー: _blocking_call_to_gemini に有効なAPIキーが渡されませんでした。", file=sys.stderr)
+        return None, None
+    try:
+        client = genai.Client(api_key=api_key)
+    except Exception as e:
+        print(f"\nエラー: APIクライアントの初期化に失敗しました: {e}", file=sys.stderr)
+        return None, None
+        
+    config = types.GenerateContentConfig(
+        tools=[types.Tool(google_search=types.GoogleSearch())],
+        thinking_config=types.ThinkingConfig(
+            thinking_budget=-1,
+            include_thoughts=True
+        )
+    )
+
+    print(f"'{full_contents.strip().splitlines()[0]}' について、AIが思考を開始します...")
+    
+    api_call_start_time = time.time() 
+    try:
+        stream = client.models.generate_content_stream(
+            model='gemini-2.5-pro',
+            contents=full_contents,
+            config=config,
+        )
+    except Exception as e:
+        print(f"\nAPI呼び出し中にエラーが発生しました: {e}", file=sys.stderr)
+        return None, None
+    
+    is_first_thought = True
+    is_first_answer = True
+    first_chunk_received = False
+    thinking_text = ""
+    answer_text = ""
+    
+    print("\n--- AIの思考プロセスと回答 ---")
+    try:
+        for chunk in stream:
+            if not first_chunk_received:
+                first_chunk_received = True
+                print(f"[{time.time() - api_call_start_time:.2f}s] API呼び出し成功、最初のチャンクを受信しました。")
+
+            if not chunk.candidates:
+                continue
+
+            for part in chunk.candidates[0].content.parts:
+                if not hasattr(part, 'text') or not part.text:
+                    continue
+                
+                if hasattr(part, 'thought') and part.thought:
+                    thinking_text += part.text
+                    if is_first_thought:
+                        print("\n[思考プロセス]:")
+                        is_first_thought = False
+                    print(part.text, end="", flush=True)
+                else:
+                    answer_text += part.text
+                    if is_first_answer:
+                        print("\n\n[最終的な回答]:")
+                        is_first_answer = False
+                    res = re.sub(r'```json|```', '', part.text)
+                    print(res, end="", flush=True)#
+        
+        print(f"\n[{time.time() - api_call_start_time:.2f}s] 全ストリーム受信完了。")
+        return thinking_text, answer_text
+    
+    except Exception as e:
+        print(f"\nストリームの処理中に予期せぬエラーが発生しました: {e}", file=sys.stderr)
+        return None, None
+
+def _blocking_count_tokens(api_key: str, model: str, contents: str) -> types.CountTokensResponse | None:
+    """
+    APIキーを使ってクライアントを初期化し、トークン数を計算する同期関数。
+    """
+    if not api_key:
+        print("\nエラー: _blocking_count_tokens に有効なAPIキーが渡されませんでした。", file=sys.stderr)
+        return None
+    try:
+        client = genai.Client(api_key=api_key)
+        return client.models.count_tokens(model=model, contents=contents)
+    except Exception as e:
+        print(f"\nトークン計算中にエラーが発生しました: {e}", file=sys.stderr)
+        return None
+
+async def main():
+    """
+    メインの非同期実行関数
+    """
+    parser = argparse.ArgumentParser(description="企業情報を検索するGeminiアプリ")
+    parser.add_argument("query", help="検索対象の企業名と住所")
+    parser.add_argument("--prompt-file", help="プロンプトが記述されたテキストファイルのパス")
+    parser.add_argument("--param", help="パラメータの値を指定するオプション")
+    args = parser.parse_args()
+
+    start_time = time.time()
+    
+    full_contents = ""
+    input_count = 0 # <<< 変更点: 入力件数を保持する変数を追加
+
+    if args.prompt_file:
+        try:
+            print(f"INFO: プロンプトファイル '{args.prompt_file}' を読み込みます。")
+            with open(args.prompt_file, 'r', encoding='utf-8') as f:
+                full_contents = f.read()
+            # プロンプトファイルの場合は暫定的に1件としてカウント
+            input_count = 1
+        except FileNotFoundError:
+            print(f"エラー: プロンプトファイルが見つかりません: {args.prompt_file}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        print("INFO: デフォルトのプロンプトテンプレートを使用します。")
+        
+        # <<< 変更点: 入力文字列から件数を計算 >>>
+        companies = [c.strip() for c in re.split(r'\s*###\s*|\s*\n\s*', args.query) if c.strip()]
+        input_count = len(companies)
+
+        prompt_template="""
+# 調査対象リスト
+- {company_name}
+
+# あなたの役割
+あなたは、与えられたリストの各項目について、Web上の信頼できる情報源を基に、
+正確な情報をファクトチェックする専門のリサーチャーです。
+
+# 任務
+以下の【調査対象リスト】に含まれる条件に基づいて、**必ずGoogle検索ツールを使って**、
+それぞれの**「最新の正確な名称」と「最新の正確な住所」**を調査してください。
+
+
+# 厳守すべきルール
+1.  **情報の源泉:** あなたの回答は、**必ずGoogle検索で得られた信頼できる情報源（公式サイトのスニペット、地図情報のスニペット）
+    **に基づいていなければなりません。プロンプト内の情報は参考程度とし、鵜呑みにしないでください。
+2.  **ファクトチェックの徹底:** 名称と住所を基に、正しい住所を再検証してください。
+3.  **欠損情報の扱い:** 調査してもがどうしても見つからない場合は、住所の値を `不正確` としてください。
+
+# 出力形式
+```markdown
+- 名称１,住所
+- 名称２,住所
+- ...  
+
+```
+"""
+
+        prompt_template2="""
+# 調査対象リスト
+- {company_name}
+
+# あなたの役割
+あなたは、与えられたリストの各項目について、Web上の信頼できる情報源を基に、
+正確な情報をファクトチェックする専門のリサーチャーです。
+
+# 任務
+以下の【調査対象リスト】に含まれる条件に基づいて、**必ずGoogle検索ツールを使って**、
+それぞれの**「最新の正確な名称」と「最新の正確な住所」**を調査してください。
+調査対象リストには、間違いが多数含まれています。間違いを見つけたら、住所にnullを入力してください。
+
+
+# 厳守すべきルール
+1.  **情報の源泉:** あなたの回答は、**必ずGoogle検索で得られた信頼できる情報源（公式サイト、地図情報、信頼できるサイトなど）
+    **に基づいていなければなりません。プロンプト内の情報は参考程度とし、鵜呑みにしないでください。
+2.  **ファクトチェックの徹底:** 名称と住所を基に、正しい住所を再検証してください。
+3.  **欠損情報の扱い:** 調査してもがどうしても見つからない場合は、住所の値を `不正確` としてください。
+
+# 出力形式
+```markdown
+- 名称１,住所
+- 名称２,住所
+- ...  
+
+```
+"""
+
+
+        prompt_template3="""
+
+# 調査対象リスト
+- {company_name}
+
+# あなたの役割
+あなたは、与えられたリストの各項目について、Web上の信頼できる情報源を基に、
+正確な情報をファクトチェックする専門のリサーチャーです。
+
+# 任務
+以下の【調査対象リスト】に含まれる名称について、**必ずGoogle検索ツールを使って**、
+それぞれの**「最新の正確な住所」と「公式な電話番号」**を調査してください。
+
+
+# 厳守すべきルール
+1.  **情報の源泉:** あなたの回答は、**必ずGoogle検索で得られた信頼できる情報源（公式サイト、地図情報、信頼できるサイトなど）
+    **に基づいていなければなりません。プロンプト内の情報は参考程度とし、鵜呑みにしないでください。
+2.  **ファクトチェックの徹底:** 名称と「大阪市天王寺区」という情報を基に、正しい住所と電話番号を再検証してください。
+3.  **欠損情報の扱い:** 調査しても電話番号がどうしても見つからない場合は、電話番号の値を `null` としてください。
+4.  **出力形式:** 思考プロセスは不要です。最終的な結果のみを、以下の形式のJSON配列として出力してください。
+
+# 出力形式
+```json
+[
+  {{
+    "name": "名称",
+    "address": "（調査で判明した正確な住所）",
+    "tel": "（調査で判明した電話番号、またはnull）"
+  }},
+  {{
+    "name": "名称",
+    "address": "（調査で判明した正確な住所）",
+    "tel": "（調査で判明した電話番号、またはnull）"
+  }}
+]
+"""
+        if args.param:
+            if args.param == "1":
+                full_contents = prompt_template.format(company_name=args.query)
+            elif args.param == "2":
+                full_contents = prompt_template2.format(company_name=args.query)
+            elif args.param == "3":
+                full_contents = prompt_template3.format(company_name=args.query)
+            
+
+    if not full_contents:
+        print("エラー: 実行するプロンプトが空です。", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"プロンプト: \n{full_contents}\n\n")
+
+    input_tokens, thinking_tokens, answer_tokens = 0, 0, 0
+
+    # 1. 入力トークン計算
+    input_key = await api_key_manager.get_next_key()
+    if input_key:
+        key_info = api_key_manager.last_used_key_info 
+        print(f"[INFO] 入力トークン計算用にキー (index: {key_info['index']}, ...{key_info['key_snippet']}) を取得。")
+        input_token_response = await asyncio.to_thread(
+            _blocking_count_tokens, input_key, 'gemini-2.5-flash', full_contents
+        )
+        if input_token_response:
+            input_tokens = input_token_response.total_tokens
+
+    # 2. Geminiへのメイン処理
+    main_call_key = await api_key_manager.get_next_key()
+    if not main_call_key:
+        print("エラー: メイン処理用のAPIキーを取得できませんでした。", file=sys.stderr)
+        sys.exit(1)
+        
+    key_info = api_key_manager.last_used_key_info 
+    print(f"[INFO] メイン処理用にキー (index: {key_info['index']}, ...{key_info['key_snippet']}) を取得。")
+    thinking_text, answer_text = await asyncio.to_thread(
+        _blocking_call_to_gemini, main_call_key, full_contents
+    )
+
+    if thinking_text is None and answer_text is None:
+        print("エラー: Geminiからの応答取得に失敗しました。処理を中断します。", file=sys.stderr)
+        sys.exit(1)
+        
+    # 3. 出力トークン計算
+    if thinking_text:
+        thinking_key = await api_key_manager.get_next_key()
+        if thinking_key:
+            key_info = api_key_manager.last_used_key_info 
+            print(f"[INFO] 思考トークン計算用にキー (index: {key_info['index']}, ...{key_info['key_snippet']}) を取得。")
+            thinking_token_response = await asyncio.to_thread(
+                _blocking_count_tokens, thinking_key, 'gemini-2.5-flash', thinking_text
+            )
+            if thinking_token_response:
+                thinking_tokens = thinking_token_response.total_tokens
+
+    if answer_text:
+        answer_key = await api_key_manager.get_next_key()
+        if answer_key:
+            key_info = api_key_manager.last_used_key_info 
+            print(f"[INFO] 回答トークン計算用にキー (index: {key_info['index']}, ...{key_info['key_snippet']}) を取得。")
+            answer_token_response = await asyncio.to_thread(
+                _blocking_count_tokens, answer_key, 'gemini-2.5-flash', answer_text
+            )
+            if answer_token_response:
+                answer_tokens = answer_token_response.total_tokens
+
+    print("\n------------------------------")
+    end_time = time.time()
+    
+    # <<< 変更点: 最終ログ出力 >>>
+    print(f"\n総実行時間: {end_time - start_time:.2f}秒")
+    if input_count > 0:
+        print(f"[ログ] 入力件数: {input_count}") # <= 追加
+    print(f"[ログ] 入力トークン数: {input_tokens}")
+    print(f"[ログ] 思考トークン数: {thinking_tokens}")
+    print(f"[ログ] 回答トークン数: {answer_tokens}")
+    total_output_tokens = thinking_tokens + answer_tokens
+    print(f"[ログ] 合計出力トークン数: {total_output_tokens}")
+    print(f"[ログ] 総計トークン数: {input_tokens + total_output_tokens}")
+
+    logdata= f"""\n\n---\n\nプロンプト:{prompt_template}
+総実行時間: {end_time - start_time:.2f}秒
+[ログ] 入力件数: {input_count}
+[ログ] 入力トークン数: {input_tokens}
+[ログ] 思考トークン数: {thinking_tokens}
+[ログ] 回答トークン数: {answer_tokens}
+[ログ] 合計出力トークン数: {total_output_tokens}
+[ログ] 総計トークン数: {input_tokens + total_output_tokens}
+
+"""
+
+    log_dir = 'log'
+    os.makedirs(log_dir, exist_ok=True)
+    file_path = os.path.join(log_dir, 'output.log')
+    try:
+        # 'a'は追記モード、'utf-8'は文字化けを防ぐために指定します
+        with open(file_path, 'a', encoding='utf-8') as f:
+            # f.write()で書き込み、末尾に改行を追加します
+            f.write(logdata)
+        
+        print(f"'{file_path}' に内容を追記しました。")
+
+    except IOError as e:
+        print(f"ファイルへの書き込み中にエラーが発生しました: {e}")
+
+
+if __name__ == "__main__":
+    exit_code = 0
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nプログラムが中断されました。")
+        exit_code = 130
+    except Exception as e:
+        print(f"予期せぬ致命的なエラーが発生しました: {e}", file=sys.stderr)
+        exit_code = 1 
+    finally:
+        api_key_manager.save_session()
+        print("[INFO] アプリケーション終了に伴いセッションを保存しました。")
+        sys.exit(exit_code)
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: gemini_zukai.md
+- 内容:
+
+```mermaid
+graph LR
+    subgraph "評価・改善司令塔 (advanced_evaluation_runner)"
+        direction LR
+
+        Start("Start<br>(企業名を入力)")
+        
+        subgraph "自動A/Bテスト実行ループ"
+            direction LR
+            
+            Run1["<b>1. 初回実行</b><br>エージェントを<br>呼び出す"]
+            Log1["<b>2. 初回ログ</b><br>取得"]
+            
+            Judge1["<b>3. Judge LLM</b><br>初回ログを評価し<br><u>改善版プロンプト</u>を生成"]
+            
+            Run2["<b>4. 再実行</b><br><u>改善版プロンプト</u>で<br>エージェントを呼び出す"]
+            Log2["<b>5. 2回目ログ</b><br>取得"]
+            
+            Judge2["<b>6. Judge LLM</b><br>2回目ログを評価"]
+        end
+
+        FinalJudge["<b>7. Chief Judge LLM</b><br>2つの評価レポートを<br>比較・分析"]
+        End("End<br>(最終比較<br>レポート出力)")
+        
+        Start --> Run1
+        Run1 --> Log1
+        Log1 --> Judge1
+        Judge1 --> Run2
+        Run2 --> Log2
+        Log2 --> Judge2
+        
+        subgraph " "
+            direction TB
+            Judge1_output["評価レポート1"]
+            Judge2_output["評価レポート2"]
+        end
+        Judge1 --> Judge1_output
+        Judge2 --> Judge2_output
+        
+        Judge1_output --> FinalJudge
+        Judge2_output --> FinalJudge
+
+        FinalJudge --> End
+    end
+
+    subgraph "AI検索エージェント (gemini_search_app)"
+        direction LR
+
+        AgentStart["プロンプトで<br>処理開始"]
+        GoogleSearch["<b>Google検索</b><br>リアルタイム<br>情報収集"]
+        Thinking["<b>AI思考内容出力</b><br>可視化"]
+        GenAnswer["<b>最終回答生成</b><br>(JSON)"]
+        AgentEnd["<b>司令塔に返す</b><br/>1.プロンプト<br/>2.AI思考ログ<br/>3.実行結果ログ"]
+
+        AgentStart --> GoogleSearch --> Thinking --> GenAnswer --> AgentEnd
+    end
+
+    %% --- 司令塔とエージェントの関係性 ---
+
+    %% --- スタイル定義 ---
+    style Start fill:#D4EDDA,stroke:#155724,stroke-width:2px
+    style End fill:#D4EDDA,stroke:#155724,stroke-width:2px
+    
+    style Judge1 fill:#FFF3CD,stroke:#856404,stroke-width:2px
+    style Judge2 fill:#FFF3CD,stroke:#856404,stroke-width:2px
+    style FinalJudge fill:#FFDDC1,stroke:#BF5B04,stroke-width:2px
+    
+    style GoogleSearch fill:#D1E7DD,stroke:#0F5132
+    style Thinking fill:#D1E7DD,stroke:#0F5132
+
+    style Judge1_output fill:#f9f9f9,stroke:#ddd
+    style Judge2_output fill:#f9f9f9,stroke:#ddd
+
+    linkStyle 0,2,4,6,9,11 stroke:#333,stroke-width:1.5px,color:black
+    linkStyle 1,3,5,7,8,10 stroke:#A0A0A0,stroke-width:1.5px,color:black
+
+```

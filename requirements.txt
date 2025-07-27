@@ -1,0 +1,5 @@
+# Google Gemini APIの新しいSDK
+google-genai
+
+# .envファイルから環境変数を読み込むために使用
+python-dotenv
