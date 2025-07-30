@@ -1,4 +1,10 @@
+以下にアプリがいろいろあります。
+以下の実行をgithub actions で実行したい。
+公開リポジトリですので無料枠で使いたい。
+apiキーも一旦、.envをプッシュしても良いです。
+どうしたらよいか教えて
 
+python gemini_search_parallel.py --prompt-file input_data_sumple.txt --parallel 10
 
 
 ---
@@ -57,7 +63,7 @@ def setup_logger(company_name: str):
     # ファイル名に使えない文字を置換
     safe_company_name = re.sub(r'[\\|/|:|*|?|"|<|>|\|]', '_', company_name)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file_name = f"{safe_company_name[:50]}_{timestamp}.log"
+    log_file_name = f"{timestamp}_{safe_company_name[:50]}.log"
     log_file_path = os.path.join(log_dir, log_file_name)
 
     # 2. ロガーの取得とレベル設定
@@ -211,7 +217,7 @@ json```{{
 """
 
 async def run_search_app(company_name: str, prompt_file: str = None) -> str:
-    target_script = "gemini_search_app_new_sdk.py"
+    target_script = "gemini_search_para.py"
     command = [sys.executable, target_script, company_name]
     if prompt_file:
         command.extend(["--prompt-file", prompt_file])
@@ -407,7 +413,7 @@ if __name__ == "__main__":
 - フォルダ名: .
 - ファイル名: api_key_manager.py
 - 内容:
-# api_key_manager.py
+# api_key_manager.py (修正後)
 import os
 import json
 import asyncio
@@ -426,25 +432,24 @@ class ApiKeyManager:
     """
     _instance = None
 
-    # シングルトンパターンを適用し、アプリケーション全体で唯一のインスタンスを保証
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
             cls._instance = super(ApiKeyManager, cls).__new__(cls)
         return cls._instance
 
     def __init__(self):
-        # __init__が複数回呼ばれることを防ぐためのフラグ
         if hasattr(self, '_initialized'):
             return
         self._initialized = True
 
         self._api_keys: list[str] = []
         self._current_index: int = -1
-        self._last_access_time: float = 0.0
-        # APIコール間のクールダウン時間（秒）。レート制限に対する安全マージン。
-        self._COOLDOWN_SECONDS = 1.0  # 1秒のクールダウン
+        
+        # --- ▼▼▼ 修正ポイント2: 不要な変数を削除 ▼▼▼ ---
+        # self._last_access_time: float = 0.0
+        # self._COOLDOWN_SECONDS = 1.0
+        # --- ▲▲▲ 修正ポイント2: 不要な変数を削除 ▲▲▲ ---
 
-        # キー選択処理をアトミック（不可分）にするためのロック
         self._key_selection_lock = asyncio.Lock()
         
         self._load_api_keys_from_env()
@@ -453,15 +458,11 @@ class ApiKeyManager:
         print(f"[{self.__class__.__name__}] 初期化完了。{len(self._api_keys)}個のキーをロードしました。")
 
     def _load_api_keys_from_env(self):
-        """ .envファイルから全てのAPIキーを読み込む """
-        keys = set() # 重複を自動的に排除するためにセットを使用
-        
-        # GOOGLE_API_KEY も読み込む
+        keys = set()
         base_key = os.getenv('GOOGLE_API_KEY')
         if base_key:
             keys.add(base_key)
         
-        # GOOGLE_API_KEY_1, _2, ... を読み込む
         i = 1
         while True:
             key = os.getenv(f'GOOGLE_API_KEY_{i}')
@@ -476,29 +477,23 @@ class ApiKeyManager:
             print("警告: 有効なAPIキーが.envファイルに設定されていません。")
 
     def _load_session(self):
-        """ セッションファイルから、最後に使ったキーのインデックスを読み込む """
         try:
             if os.path.exists(SESSION_FILE):
                 with open(SESSION_FILE, 'r') as f:
                     data = json.load(f)
                     last_index = data.get('lastKeyIndex', -1)
-                    # 読み込んだインデックスが現在のキーリストの範囲内か確認
                     if 0 <= last_index < len(self._api_keys):
                         self._current_index = last_index
                         print(f"[{self.__class__.__name__}] セッションをロードしました。次のキーインデックスは { (last_index + 1) % len(self._api_keys) } から開始します。")
                     else:
                         self._current_index = -1
-
         except (IOError, json.JSONDecodeError) as e:
             print(f"セッションファイルの読み込み中にエラーが発生しました: {e}")
             self._current_index = -1
 
     def save_session(self):
-        """ 最後に使ったキーのインデックスをセッションファイルに保存する """
-        # 保存すべきキーがない場合は何もしない
         if not self._api_keys:
             return
-            
         try:
             with open(SESSION_FILE, 'w') as f:
                 json.dump({'lastKeyIndex': self._current_index}, f)
@@ -507,36 +502,35 @@ class ApiKeyManager:
 
     async def get_next_key(self) -> str | None:
         """
-        次の利用可能なAPIキーを、安全な排他制御とクールダウン付きで取得する。
+        次の利用可能なAPIキーを、安全な排他制御付きで取得する。
         """
         if not self._api_keys:
             print("エラー: 利用可能なAPIキーがありません。")
             return None
 
-        # asyncio.Lockを使い、キーの選択とインデックス更新処理が同時に実行されないようにする
         async with self._key_selection_lock:
+            # --- ▼▼▼ 修正ポイント1: クールダウン（待機）ロジックを完全に削除 ---
             # 前回の呼び出しからクールダウン時間内に再度呼び出された場合、待機する
             # ループの初回実行時などを考慮し、self._last_access_timeが0より大きい場合のみチェック
-            if self._last_access_time > 0:
-                now = asyncio.get_event_loop().time()
-                elapsed_time = now - self._last_access_time
-                if elapsed_time < self._COOLDOWN_SECONDS:
-                    wait_time = self._COOLDOWN_SECONDS - elapsed_time
-                    await asyncio.sleep(wait_time)
+            # if self._last_access_time > 0:
+            #     now = asyncio.get_event_loop().time()
+            #     elapsed_time = now - self._last_access_time
+            #     if elapsed_time < self._COOLDOWN_SECONDS:
+            #         wait_time = self._COOLDOWN_SECONDS - elapsed_time
+            #         await asyncio.sleep(wait_time)
+            # --- ▲▲▲ 修正ポイント1: クールダウン（待機）ロジックを完全に削除 ▲▲▲ ---
             
             # ラウンドロビン方式で次のインデックスを計算
             self._current_index = (self._current_index + 1) % len(self._api_keys)
-            # キーを払い出した時刻を更新
-            self._last_access_time = asyncio.get_event_loop().time()
+            
+            # --- ▼▼▼ 修正ポイント2: 不要な変数の更新を削除 ▼▼▼ ---
+            # self._last_access_time = asyncio.get_event_loop().time()
+            # --- ▲▲▲ 修正ポイント2: 不要な変数の更新を削除 ▲▲▲ ---
             
             return self._api_keys[self._current_index]
 
     @property
     def last_used_key_info(self) -> dict:
-        """
-        最後に払い出されたキーに関する情報を返す読み取り専用プロパティ。
-        デバッグやロギング目的で使用する。
-        """
         if self._current_index == -1 or not self._api_keys:
             return {
                 "key_snippet": "N/A",
@@ -546,12 +540,11 @@ class ApiKeyManager:
         
         key = self._api_keys[self._current_index]
         return {
-            "key_snippet": key[-4:], # 最後の4文字
+            "key_snippet": key[-4:],
             "index": self._current_index,
             "total": len(self._api_keys)
         }
 
-# シングルトンインスタンスとしてエクスポート（プログラム全体で一つのインスタンスを共有する）
 api_key_manager = ApiKeyManager()
 
 
@@ -3395,6 +3388,335 @@ Geminiの「コードの実行」ツールは、API呼び出しのコンテキ�
 
 
 - フォルダ名: .
+- ファイル名: gemini_search.py
+- 内容:
+import os
+import sys
+import time
+import argparse
+import asyncio
+from google import genai
+from google.genai import types
+from dotenv import load_dotenv
+import json
+import re
+
+# 作成したAPIキーマネージャーをインポート
+from api_key_manager import api_key_manager
+
+# .envファイルから環境変数を読み込む
+load_dotenv()
+
+def _blocking_call_to_gemini(api_key: str, full_contents: str):
+    """
+    GeminiへのAPI呼び出しとストリーム処理という、すべての同期的（ブロッキング）
+    な処理をまとめて実行する関数。この関数全体が別スレッドで実行される。
+    
+    Args:
+        api_key (str): このAPI呼び出しで使用するAPIキー。
+        full_contents (str): モデルに渡す完全なプロンプト。
+    """
+    
+    if not api_key:
+        print("\nエラー: _blocking_call_to_gemini に有効なAPIキーが渡されませんでした。", file=sys.stderr)
+        return None, None
+    try:
+        client = genai.Client(api_key=api_key)
+    except Exception as e:
+        print(f"\nエラー: APIクライアントの初期化に失敗しました: {e}", file=sys.stderr)
+        return None, None
+        
+    config = types.GenerateContentConfig(
+        tools=[types.Tool(google_search=types.GoogleSearch())],
+        thinking_config=types.ThinkingConfig(
+            thinking_budget=-1,
+            include_thoughts=True
+        )
+    )
+
+    print(f"'{full_contents.splitlines()[0]}' について、AIが思考を開始します...", file=sys.stderr)
+    
+    api_call_start_time = time.time() 
+    try:
+        stream = client.models.generate_content_stream(
+            model='gemini-2.5-flash', # モデル名を必要に応じて変更してください
+            contents=full_contents,
+            config=config,
+        )
+    except Exception as e:
+        print(f"\nAPI呼び出し中にエラーが発生しました: {e}", file=sys.stderr)
+        return None, None
+    
+    is_first_thought = True
+    is_first_answer = True
+    first_chunk_received = False
+    thinking_text = ""
+    answer_text = ""
+    
+    print("\n--- AIの思考プロセスと回答 ---", file=sys.stderr)
+    try:
+        for chunk in stream:
+            if not first_chunk_received:
+                first_chunk_received = True
+                print(f"[{time.time() - api_call_start_time:.2f}s] API呼び出し成功、最初のチャンクを受信しました。", file=sys.stderr)
+
+            if not chunk.candidates:
+                continue
+
+            for part in chunk.candidates[0].content.parts:
+                if not hasattr(part, 'text') or not part.text:
+                    continue
+                
+                if hasattr(part, 'thought') and part.thought:
+                    thinking_text += part.text
+                    if is_first_thought:
+                        print("\n[思考プロセス]:", file=sys.stderr)
+                        is_first_thought = False
+                    print(part.text, end="", flush=True, file=sys.stderr)
+                else:
+                    answer_text += part.text
+                    if is_first_answer:
+                        #print("\n\n[最終的な回答プレビュー]:", file=sys.stderr)
+                        is_first_answer = False
+                    #print(part.text, end="", flush=True, file=sys.stderr)
+        print(f"\n[{time.time() - api_call_start_time:.2f}s] 全ストリーム受信完了。", file=sys.stderr)
+        return thinking_text, answer_text
+    
+    except Exception as e:
+        print(f"\nストリームの処理中に予期せぬエラーが発生しました: {e}", file=sys.stderr)
+        return None, None
+
+def _blocking_count_tokens(api_key: str, model: str, contents: str) -> types.CountTokensResponse | None:
+    """
+    APIキーを使ってクライアントを初期化し、トークン数を計算する同期関数。
+    """
+    if not api_key:
+        print("\nエラー: _blocking_count_tokens に有効なAPIキーが渡されませんでした。", file=sys.stderr)
+        return None
+    try:
+        client = genai.Client(api_key=api_key)
+        return client.models.count_tokens(model=model, contents=contents)
+    except Exception as e:
+        print(f"\nトークン計算中にエラーが発生しました: {e}", file=sys.stderr)
+        return None
+
+async def main():
+    """
+    メインの非同期実行関数
+    """
+    parser = argparse.ArgumentParser(description="企業情報を検索するGeminiアプリ")
+    parser.add_argument("query", help="検索対象の企業名と住所")
+    parser.add_argument("--prompt-file", help="プロンプトが記述されたテキストファイルのパス")
+    #parser.add_argument("--output-file", "-o", help="結果を追記するJSONファイルのパス")
+    args = parser.parse_args()
+
+    start_time = time.time()
+    
+    full_contents = ""
+
+    if args.prompt_file:
+        try:
+            print(f"INFO: プロンプトファイル '{args.prompt_file}' を読み込みます。", file=sys.stderr)
+            with open(args.prompt_file, 'r', encoding='utf-8') as f:
+                full_contents = f.read()
+        except FileNotFoundError:
+            print(f"エラー: プロンプトファイルが見つかりません: {args.prompt_file}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        print("INFO: デフォルトのプロンプトテンプレートを使用します。", file=sys.stderr)
+        prompt_template="""
+# 調査対象企業
+- {company_name}
+
+# 上記の企業について、ルールに従い、以下のJSON形式で出力してください。
+
+# 厳守すべきルール
+1. 入力された、会社名　住所の情報から、出力内容を特定してください。
+2. ファクトチェックの徹底:名称と住所を基に、正しい業種を再検証してください。
+3. 欠損情報の扱い:調査しても情報が見つからない場合は、項目の値を `不明` としてください。
+4. 以下の４つの主要調査項目のうち、２項目が見つからなければ、即座に調査を中止し、下記の「調査中断レポート」を出力してください。
+   主要調査項目（４項目）：`officialUrl`, `industry`, `email`, `tel`
+5. 上記4.に抵触しなかった場合のみ、収集した情報を下記の「通常調査レポート」の形式で出力してください。
+
+# 出力形式 (JSON)
+# 調査中断レポート
+```json
+{{
+  "status": "terminated",
+  "error": "Required information could not be found.",
+  "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+  "targetCompany": "{company_name}"
+}}```
+
+# 通常調査レポート
+```json
+{{
+  "status": "success",
+  "data": {{
+    "companyName": "企業の正式名称（string）",
+    "companyStatus": "企業の現在の状況（例：活動中, 閉鎖, 不明）（string）",
+    "address": "本社の所在地（string）",
+    "officialUrl": "公式サイトのURL（string）",
+    "industry": "主要な業種（string）",
+    "email": "メールアドレス（string）",
+    "tel": "代表電話番号（string）",
+    "fax": "代表FAX番号（string）",
+    "capital": "資本金（string）",
+    "founded": "設立年月（string）",
+    "businessSummary": "事業内容の簡潔な要約（string）",
+    "strengths": "企業の強みや特徴（string）"
+  }}
+}}```
+"""
+        full_contents = prompt_template.format(company_name=args.query)
+
+    if not full_contents:
+        print("エラー: 実行するプロンプトが空です。", file=sys.stderr)
+        sys.exit(1)
+
+    input_tokens, thinking_tokens, answer_tokens = 0, 0, 0
+
+    input_key = await api_key_manager.get_next_key()
+    if input_key:
+        key_info = api_key_manager.last_used_key_info 
+        print(f"[INFO] 入力トークン計算用にキー (index: {key_info['index']}, ...{key_info['key_snippet']}) を取得。", file=sys.stderr)
+        input_token_response = await asyncio.to_thread(
+            _blocking_count_tokens, input_key, 'gemini-2.5-flash', full_contents
+        )
+        if input_token_response:
+            input_tokens = input_token_response.total_tokens
+
+    main_call_key = await api_key_manager.get_next_key()
+    if not main_call_key:
+        print("エラー: メイン処理用のAPIキーを取得できませんでした。", file=sys.stderr)
+        sys.exit(1)
+        
+    key_info = api_key_manager.last_used_key_info 
+    print(f"[INFO] メイン処理用にキー (index: {key_info['index']}, ...{key_info['key_snippet']}) を取得。", file=sys.stderr)
+    thinking_text, answer_text = await asyncio.to_thread(
+        _blocking_call_to_gemini, main_call_key, full_contents
+    )
+
+    if thinking_text is None and answer_text is None:
+        print("エラー: Geminiからの応答取得に失敗しました。処理を中断します。", file=sys.stderr)
+        sys.exit(1)
+
+    if thinking_text:
+        thinking_key = await api_key_manager.get_next_key()
+        if thinking_key:
+            key_info = api_key_manager.last_used_key_info 
+            print(f"[INFO] 思考トークン計算用にキー (index: {key_info['index']}, ...{key_info['key_snippet']}) を取得。", file=sys.stderr)
+            thinking_token_response = await asyncio.to_thread(
+                _blocking_count_tokens, thinking_key, 'gemini-2.5-flash', thinking_text
+            )
+            if thinking_token_response:
+                thinking_tokens = thinking_token_response.total_tokens
+
+    # <--- ▼▼▼ ここからが出力形式を修正した箇所です ▼▼▼ --->
+
+    if answer_text:
+        answer_key = await api_key_manager.get_next_key()
+        if answer_key:
+            key_info = api_key_manager.last_used_key_info 
+            print(f"[INFO] 回答トークン計算用にキー (index: {key_info['index']}, ...{key_info['key_snippet']}) を取得。", file=sys.stderr)
+            answer_token_response = await asyncio.to_thread(
+                _blocking_count_tokens, answer_key, 'gemini-2.5-flash', answer_text
+            )
+            if answer_token_response:
+                answer_tokens = answer_token_response.total_tokens
+
+    end_time = time.time()
+
+    # time_tokens オブジェクトを作成
+    time_tokens_info = {
+        "time": round(end_time - start_time, 2),
+        "input_tokens": input_tokens,
+        "thinking_tokens": thinking_tokens,
+        "answer_tokens": answer_tokens,
+        "total_tokens": input_tokens + thinking_tokens + answer_tokens
+    }
+
+    final_output = {}
+    try:
+        # answer_textからJSON部分を抽出
+        json_str = answer_text.replace("```json", "").replace("```", "").strip()
+        if not json_str:
+            raise json.JSONDecodeError("APIからの応答が空です", json_str, 0)
+            
+        # JSON文字列をPython辞書に変換
+        final_output = json.loads(json_str)
+
+    except json.JSONDecodeError as e:
+        print(f"エラー: API応答のJSON解析に失敗しました: {e}", file=sys.stderr)
+        final_output = {
+            "status": "error",
+            "error": "Failed to parse API response",
+            "message": "APIからの応答をJSONとして解析できませんでした。",
+            "raw_response": answer_text
+        }
+
+    # 最終的な辞書にtime_tokens情報を追加
+    final_output["time_tokens"] = time_tokens_info
+
+    print(json.dumps(final_output, indent=2, ensure_ascii=False))
+    # --- ▼▼▼ ここからがファイル出力と追記のロジックです ▼▼▼ ---
+
+    # --output-file 引数が指定されている場合、ファイルに追記する
+    output_file='output.json'
+    results_list = []
+    try:
+        # 既存のファイルがあれば読み込む
+        if os.path.exists(output_file):
+            with open(output_file, 'r', encoding='utf-8') as f:
+                # ファイルが空でなければJSONとして読み込む
+                content = f.read()
+                if content.strip():
+                    results_list = json.loads(content)
+                # 読み込んだデータがリストでなければ、警告して新しいリストで上書きする
+                if not isinstance(results_list, list):
+                    print(f"警告: 出力ファイル {args.output_file} はJSON配列形式ではありません。新しいリストで上書きします。", file=sys.stderr)
+                    results_list = []
+    except (json.JSONDecodeError, FileNotFoundError):
+        print(f"警告: 出力ファイル {args.output_file} の読み込みに失敗しました。新しいファイルを作成します。", file=sys.stderr)
+        results_list = []
+
+    # 今回の結果をリストに追加
+    results_list.append(final_output)
+
+    # リスト全体をファイルに書き込む（上書き）
+    try:
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(results_list, f, indent=2, ensure_ascii=False)
+        print(f"\n結果を {output_file} に追記しました。", file=sys.stderr)
+    except IOError as e:
+        print(f"\nエラー: ファイル '{output_file}' への書き込みに失敗しました: {e}", file=sys.stderr)
+
+    # 常に今回の結果を標準出力にも表示する
+    #print(json.dumps(results_list, f, indent=2, ensure_ascii=False))
+
+    # --- ▲▲▲ ここまでがファイル出力と追記のロジックです ▲▲▲ ---
+
+if __name__ == "__main__":
+    exit_code = 0
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nプログラムが中断されました。", file=sys.stderr)
+        exit_code = 130
+    except Exception as e:
+        print(f"予期せぬ致命的なエラーが発生しました: {e}", file=sys.stderr)
+        exit_code = 1
+    finally:
+        api_key_manager.save_session()
+        print("[INFO] アプリケーション終了に伴いセッションを保存しました。", file=sys.stderr)
+        sys.exit(exit_code)
+
+
+
+---
+
+
+- フォルダ名: .
 - ファイル名: gemini_search_app_new_sdk 動く.py
 - 内容:
 import sys
@@ -3780,28 +4102,46 @@ async def main():
         prompt_template="""
 - {company_name}
 
-# 上記の複数の企業について、ルールに従い、以下のJSON形式で出力してください。
+# 上記の企業について、ルールに従い、以下のJSON形式で出力してください。
 
 # 厳守すべきルール
-1. *業種を特定する事のみに専念し、他の事は調べないでください。*
-2. *入力された、複数の会社名　住所の情報から、業種を特定してください。*
-3. *入力された、会社の件数を数えてください。*
-4.  **情報の源泉:** あなたの回答は、**必ずGoogle検索で得られた信頼できる情報源（公式サイト、地図情報）
-    **に基づいていなければなりません。プロンプト内の情報は参考程度とし、鵜呑みにしないでください。
-5.  **ファクトチェックの徹底:** 名称と住所を基に、正しい業種を再検証してください。
-6.  **欠損情報の扱い:** 調査しても情報が見つからない場合は、業種の値を `不明` としてください。
+1. 入力された、会社名　住所の情報から、出力内容を特定してください。
+2. ファクトチェックの徹底:名称と住所を基に、正しい業種を再検証してください。
+3. 欠損情報の扱い:調査しても情報が見つからない場合は、業種の値を `不明` としてください。
+4. 以下の４つの主要調査項目のうち、２項目が見つからなければ、即座に調査を中止し、下記の「調査中断レポート」を出力してください。
+   主要調査項目（４項目）：`officialUrl`, `industry`, `email`, `tel`
+5. 上記4.に抵触しなかった場合のみ、収集した情報を下記の「通常調査レポート」の形式で出力してください。
+
 
 
 # 出力形式 (JSON)
+# 調査中断レポート
+```json
+{{
+  "status": "terminated",
+  "error": "Required information could not be found.",
+  "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+  "targetCompany": "{company_name}"
+}}```
+
+
 ### 通常調査レポート
 ```json
 {{
   "status": "success",
-  "count": {{input_count}},
   "data": {{
     "companyName": "企業の正式名称（string）",
-    "address": "本社の所在地（string）"
+    "companyStatus": "企業の現在の状況（例：活動中, 閉鎖, 情報なし）（string）",
+    "address": "本社の所在地（string）",
+    "officialUrl": "公式サイトのURL（string）簡潔に記述してください。",
     "industry": "主要な業種（string）",
+    "email": "メールアドレス（string）調査方法：公式サイト＋（会社概要、お問い合わせ）等で検索し、HTMLの<a>タグから、mailto:等を探すこと。分からない場合は`不明`とすること",
+    "tel": "代表電話番号（string）",
+    "fax": "代表FAX番号（string）",
+    "capital": "資本金（string）",
+    "founded": "設立年月（string）",
+    "businessSummary": "事業内容の簡潔な要約（string）",
+    "strengths": "企業の強みや特徴（string）"
   }}
 }}```
 """
@@ -3940,6 +4280,9 @@ async def main():
                 thinking_tokens = thinking_token_response.total_tokens
 
     if answer_text:
+        answer_text1 = answer_text.replace("```json", "").replace("```", "")
+        print(answer_text1)
+        print('\nanswer_text1')
         answer_key = await api_key_manager.get_next_key()
         if answer_key:
             key_info = api_key_manager.last_used_key_info 
@@ -3952,13 +4295,11 @@ async def main():
 
     print("\n------------------------------")
     end_time = time.time()
-    print(f"\n総実行時間: {end_time - start_time:.2f}秒")
-    print(f"[ログ] 入力トークン数: {input_tokens}")
-    print(f"[ログ] 思考トークン数: {thinking_tokens}")
-    print(f"[ログ] 回答トークン数: {answer_tokens}")
-    total_output_tokens = thinking_tokens + answer_tokens
-    print(f"[ログ] 合計出力トークン数: {total_output_tokens}")
-    print(f"[ログ] 総計トークン数: {input_tokens + total_output_tokens}")
+    print(f"time: {end_time - start_time:.2f}秒")
+    print(f"input_tokens: {input_tokens}")
+    print(f"thinking_tokens: {thinking_tokens}")
+    print(f"answer_tokens: {answer_tokens}")
+    print(f"all_tokens: {input_tokens + thinking_tokens + answer_tokens}")
 
 if __name__ == "__main__":
     exit_code = 0
@@ -4350,6 +4691,632 @@ if __name__ == "__main__":
 
 
 - フォルダ名: .
+- ファイル名: gemini_search_para.py
+- 内容:
+# gemini_search_parallel.py (1件ごとのリアルタイム追記版)
+
+import os
+import sys
+import time
+import argparse
+import asyncio
+from google import genai
+from google.genai import types
+from dotenv import load_dotenv
+import json
+import re
+
+# --- ▼▼▼ リトライ機能のために、特定のエラーを捕捉するライブラリをインポート ▼▼▼ ---
+from google.api_core import exceptions
+
+from api_key_manager import api_key_manager
+
+load_dotenv()
+
+if 'GOOGLE_API_KEY' in os.environ:
+    del os.environ['GOOGLE_API_KEY']
+    
+# --- ▼▼▼ 複数タスクからのファイル書き込みを保護するためのロックを作成 ▼▼▼ ---
+file_write_lock = asyncio.Lock()
+
+
+# (この関数は変更なし)
+def _blocking_call_to_gemini(api_key: str, full_contents: str, query_for_log: str):
+    MAX_RETRIES = 3
+    INITIAL_DELAY = 2
+    for attempt in range(MAX_RETRIES):
+        try:
+            if not api_key:
+                print(f"\nエラー ({query_for_log}): 有効なAPIキーがありません。", file=sys.stderr)
+                return None, None
+            client = genai.Client(api_key=api_key)
+            config = types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                thinking_config=types.ThinkingConfig(thinking_budget=-1, include_thoughts=True)
+            )
+            if attempt == 0:
+                print(f"({query_for_log}) AIが思考を開始します...", file=sys.stderr)
+            api_call_start_time = time.time() 
+            stream = client.models.generate_content_stream(model='gemini-2.5-flash', contents=full_contents, config=config)
+            thinking_text, answer_text = "", ""
+            for chunk in stream:
+                if not chunk.candidates: continue
+                # --- SDKのバージョン差異に対応 ---
+                if hasattr(chunk.candidates[0].content, 'parts'):
+                    parts = chunk.candidates[0].content.parts
+                else:
+                    parts = [] # Fallback for older versions or different structures
+                for part in parts:
+                    if not hasattr(part, 'text') or not part.text: continue
+                    if hasattr(part, 'thought') and part.thought:
+                        thinking_text += part.text
+                    else:
+                        answer_text += part.text
+            elapsed = time.time() - api_call_start_time
+            print(f"({query_for_log}) 全ストリーム受信完了 ({elapsed:.2f}s)。", file=sys.stderr)
+            return thinking_text, answer_text
+        except exceptions.ResourceExhausted as e:
+            if attempt < MAX_RETRIES - 1:
+                delay = INITIAL_DELAY ** (attempt + 1)
+                print(f"警告 ({query_for_log}): APIレートリミットです。{delay}秒待機して再試行します... (試行 {attempt + 2}/{MAX_RETRIES})", file=sys.stderr)
+                time.sleep(delay)
+            else:
+                print(f"エラー ({query_for_log}): 最大リトライ回数({MAX_RETRIES}回)を超えました。メインAPIコール失敗。", file=sys.stderr)
+                return None, None
+        except Exception as e:
+            print(f"\nストリームの処理中に予期せぬエラーが発生しました ({query_for_log}): {e}", file=sys.stderr)
+            return None, None
+    return None, None
+
+# (この関数は変更なし)
+def _blocking_count_tokens(api_key: str, model: str, contents: str) -> types.CountTokensResponse | None:
+    if not api_key: return None
+    try:
+        client = genai.Client(api_key=api_key)
+        return client.models.count_tokens(model=model, contents=contents)
+    except Exception as e:
+        print(f"\nトークン計算中にエラーが発生しました ({contents[:30]}...): {e}", file=sys.stderr)
+        return None
+
+# --- ▼▼▼ この関数が、ファイルへの書き込みまで担当するように修正 ▼▼▼ ---
+async def process_query_and_write_to_file(query: str, semaphore: asyncio.Semaphore, output_filename: str):
+    """
+    単一クエリを処理し、完了後、即座に結果をJSONファイルに追記する。
+    """
+    async with semaphore:
+        start_time = time.time()
+        query_for_log = query[25:50] + '...' if len(query) > 40 else query
+
+        prompt_template="""
+# 調査対象企業
+- {company_name}
+# 上記の企業について、ルールに従い、以下のJSON形式で出力してください。
+# 厳守すべきルール
+1. 入力された、会社名　住所の情報から、出力内容を特定してください。
+2. ファクトチェックの徹底:名称と住所を基に、正しい業種を再検証してください。
+3. 欠損情報の扱い:調査しても情報が見つからない場合は、項目の値を `不明` としてください。
+4. 以下の４つの主要調査項目のうち、２項目が見つからなければ、即座に調査を中止し、下記の「調査中断レポート」を出力してください。
+   主要調査項目（４項目）：`officialUrl`, `industry`, `email`, `tel`
+5. 上記4.に抵触しなかった場合のみ、収集した情報を下記の「通常調査レポート」の形式で出力してください。
+# 出力形式 (JSON)
+# 調査中断レポート
+```json
+{{
+  "status": "terminated",
+  "error": "Required information could not be found.",
+  "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+  "targetCompany": "{company_name}"
+}}```
+# 通常調査レポート
+```json
+{{
+  "status": "success",
+  "data": {{
+    "companyName": "企業の正式名称（string）",
+    "companyStatus": "企業の現在の状況（例：活動中, 閉鎖, 不明）（string）",
+    "address": "本社の所在地（string）",
+    "officialUrl": "公式サイトのURL（string）",
+    "industry": "主要な業種（string）",
+    "email": "メールアドレス（string）",
+    "tel": "代表電話番号（string）",
+    "fax": "代表FAX番号（string）",
+    "capital": "資本金（string）",
+    "founded": "設立年月（string）",
+    "businessSummary": "事業内容の簡潔な要約（string）",
+    "strengths": "企業の強みや特徴（string）"
+  }}
+}}```
+"""
+
+        full_contents = prompt_template.format(company_name=query)
+
+        input_tokens, thinking_tokens, answer_tokens = 0, 0, 0
+
+        input_key = await api_key_manager.get_next_key()
+        if input_key:
+            input_token_response = await asyncio.to_thread(
+                _blocking_count_tokens, input_key, 'gemini-2.5-flash', full_contents
+            )
+            if input_token_response: input_tokens = input_token_response.total_tokens
+
+        main_call_key = await api_key_manager.get_next_key()
+        if not main_call_key:
+            print(f"エラー ({query_for_log}): メイン処理用のAPIキーを取得できませんでした。", file=sys.stderr)
+            return None
+            
+        thinking_text, answer_text = await asyncio.to_thread(
+            _blocking_call_to_gemini, main_call_key, full_contents, query_for_log
+        )
+
+        if thinking_text is None and answer_text is None:
+            print(f"エラー ({query_for_log}): Geminiからの応答取得に失敗しました。", file=sys.stderr)
+            return None
+
+        if thinking_text:
+            thinking_key = await api_key_manager.get_next_key()
+            if thinking_key:
+                thinking_token_response = await asyncio.to_thread(
+                    _blocking_count_tokens, thinking_key, 'gemini-2.5-flash', thinking_text
+                )
+                if thinking_token_response: thinking_tokens = thinking_token_response.total_tokens
+
+        if answer_text:
+            answer_key = await api_key_manager.get_next_key()
+            if answer_key:
+                answer_token_response = await asyncio.to_thread(
+                    _blocking_count_tokens, answer_key, 'gemini-2.5-flash', answer_text
+                )
+                if answer_token_response: answer_tokens = answer_token_response.total_tokens
+
+        end_time = time.time()
+        time_tokens_info = {
+            "time": round(end_time - start_time, 2),
+            "input_tokens": input_tokens,
+            "thinking_tokens": thinking_tokens,
+            "answer_tokens": answer_tokens,
+            "total_tokens": input_tokens + thinking_tokens + answer_tokens
+        }
+
+        final_output = {}
+        try:
+            # --- ▼▼▼ ここが唯一の修正箇所です ▼▼▼ ---
+            
+            json_str = None
+            # 1. ```json ... ``` というブロックを、説明文ごと全文の中から探す (re.DOTALLで改行も対象に)
+            match = re.search(r"```json(.*)```", answer_text, re.DOTALL)
+            
+            if match:
+                # 2. ブロックが見つかった場合、その中身だけを抽出する (group(1))
+                json_str = match.group(1).strip()
+            else:
+                # 3. ブロックが見つからない場合（正常系）、応答全体がJSONだと仮定する
+                json_str = answer_text.strip()
+            
+            if not json_str:
+                raise json.JSONDecodeError("抽出後のJSON文字列が空です", "", 0)
+
+            final_output = json.loads(json_str)
+
+        except json.JSONDecodeError as e:
+            print(json_str)
+            print(f"NG_json_str") # デバッグ用
+            print(f"エラー ({query_for_log}): API応答のJSON解析に失敗しました: {e}", file=sys.stderr)
+            final_output = {
+                "status": "error",
+                "error": "Failed to parse API response",
+                "message": f"APIからの応答をJSONとして解析できませんでした。 raw_response: {answer_text}",
+                "raw_response": answer_text
+            }
+        
+        # --- ▲▲▲ ここまでが唯一の修正箇所です ▲▲▲ ---        
+        final_output["time_tokens"] = time_tokens_info
+        # --- ▼▼▼ ここからがファイル追記処理 ▼▼▼ ---
+
+        async with file_write_lock: # ロックを取得して、ファイルアクセスを排他制御
+            all_data = []
+            try:
+                # 既存のファイルを読み込む
+                if os.path.exists(output_filename) and os.path.getsize(output_filename) > 0:
+                    with open(output_filename, 'r', encoding='utf-8') as f:
+                        all_data = json.load(f)
+                        if not isinstance(all_data, list):
+                            all_data = []
+            except (json.JSONDecodeError, FileNotFoundError):
+                pass
+            
+            # 今回の結果を追加
+            all_data.append(final_output)
+            
+            # ファイルに書き戻す
+            try:
+                with open(output_filename, 'w', encoding='utf-8') as f:
+                    json.dump(all_data, f, indent=2, ensure_ascii=False)
+                print(f"({query_for_log}) 結果を {output_filename} に追記しました。", file=sys.stderr)
+            except IOError as e:
+                print(f"エラー ({query_for_log}): ファイル書き込みに失敗: {e}", file=sys.stderr)
+        
+        # 標準出力用に結果を返す
+        return final_output
+
+async def main():
+    parser = argparse.ArgumentParser(description="企業情報を検索し、結果をJSONで出力するアプリ")
+    parser.add_argument("query", nargs='?', default=None, help="検索対象の企業名と住所（単一実行モード時）")
+    parser.add_argument("--prompt-file", help="複数クエリが記述されたテキストファイルのパス（並列実行モード時）")
+    parser.add_argument("--parallel", type=int, default=5, help="最大並列実行数（デフォルト: 5）")
+    args = parser.parse_args()
+
+    output_filename = "output.json"
+    is_parallel_mode = bool(args.prompt_file)
+
+    if is_parallel_mode:
+        print(f"INFO: 並列実行モードで起動します (最大{args.parallel}並列)。", file=sys.stderr)
+        try:
+            with open(args.prompt_file, 'r', encoding='utf-8') as f:
+                queries = [line.strip() for line in f if line.strip()]
+            if not queries:
+                print(f"エラー: プロンプトファイル '{args.prompt_file}' が空です。", file=sys.stderr)
+                sys.exit(1)
+            print(f"INFO: {len(queries)}件のクエリをファイルから読み込みました。", file=sys.stderr)
+        except FileNotFoundError:
+            print(f"エラー: プロンプトファイルが見つかりません: {args.prompt_file}", file=sys.stderr)
+            sys.exit(1)
+        
+        semaphore = asyncio.Semaphore(args.parallel)
+        # 新しいタスク関数を呼び出す
+        tasks = [process_query_and_write_to_file(q, semaphore, output_filename) for q in queries]
+        # 全てのタスクの完了を待つ
+        results = await asyncio.gather(*tasks)
+        
+        successful_results = [res for res in results if res is not None]
+        print(f"\n--- 全タスク完了: {len(successful_results)} / {len(queries)} 件の処理に成功 ---", file=sys.stderr)
+        
+        # 最後に、標準出力にだけ全結果をまとめて表示する
+        print(json.dumps(successful_results, indent=2, ensure_ascii=False))
+        
+    else: # (単一実行モードも同様に修正)
+        if not args.query:
+            parser.error("単一実行モードでは 'query' 引数が必要です。")
+        print("INFO: 単一実行モードで起動します。", file=sys.stderr)
+        semaphore = asyncio.Semaphore(1)
+        # 新しいタスク関数を呼び出す
+        result = await process_query_and_write_to_file(args.query, semaphore, output_filename)
+        if result:
+            # 標準出力に結果を表示
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+
+if __name__ == "__main__":
+    exit_code = 0
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nプログラムが中断されました。", file=sys.stderr)
+        exit_code = 130
+    except Exception as e:
+        print(f"予期せぬ致命的なエラーが発生しました: {e}", file=sys.stderr)
+        exit_code = 1
+    finally:
+        api_key_manager.save_session()
+        print("[INFO] アプリケーション終了に伴いセッションを保存しました。", file=sys.stderr)
+        sys.exit(exit_code)
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: gemini_search_parallel.py
+- 内容:
+# gemini_search_parallel.py (1件ごとのリアルタイム追記版)
+
+import os
+import sys
+import time
+import argparse
+import asyncio
+from google import genai
+from google.genai import types
+from dotenv import load_dotenv
+import json
+import re
+
+# --- ▼▼▼ リトライ機能のために、特定のエラーを捕捉するライブラリをインポート ▼▼▼ ---
+from google.api_core import exceptions
+
+from api_key_manager import api_key_manager
+
+load_dotenv()
+
+if 'GOOGLE_API_KEY' in os.environ:
+    del os.environ['GOOGLE_API_KEY']
+    
+# --- ▼▼▼ 複数タスクからのファイル書き込みを保護するためのロックを作成 ▼▼▼ ---
+file_write_lock = asyncio.Lock()
+
+
+# (この関数は変更なし)
+def _blocking_call_to_gemini(api_key: str, full_contents: str, query_for_log: str):
+    MAX_RETRIES = 3
+    INITIAL_DELAY = 2
+    for attempt in range(MAX_RETRIES):
+        try:
+            if not api_key:
+                print(f"\nエラー ({query_for_log}): 有効なAPIキーがありません。", file=sys.stderr)
+                return None, None
+            client = genai.Client(api_key=api_key)
+            config = types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                thinking_config=types.ThinkingConfig(thinking_budget=-1, include_thoughts=True)
+            )
+            if attempt == 0:
+                print(f"({query_for_log}) AIが思考を開始します...", file=sys.stderr)
+            api_call_start_time = time.time() 
+            stream = client.models.generate_content_stream(model='gemini-2.5-flash', contents=full_contents, config=config)
+            thinking_text, answer_text = "", ""
+            for chunk in stream:
+                if not chunk.candidates: continue
+                # --- SDKのバージョン差異に対応 ---
+                if hasattr(chunk.candidates[0].content, 'parts'):
+                    parts = chunk.candidates[0].content.parts
+                else:
+                    parts = [] # Fallback for older versions or different structures
+                for part in parts:
+                    if not hasattr(part, 'text') or not part.text: continue
+                    if hasattr(part, 'thought') and part.thought:
+                        thinking_text += part.text
+                    else:
+                        answer_text += part.text
+            elapsed = time.time() - api_call_start_time
+            print(f"({query_for_log}) 全ストリーム受信完了 ({elapsed:.2f}s)。", file=sys.stderr)
+            return thinking_text, answer_text
+        except exceptions.ResourceExhausted as e:
+            if attempt < MAX_RETRIES - 1:
+                delay = INITIAL_DELAY ** (attempt + 1)
+                print(f"警告 ({query_for_log}): APIレートリミットです。{delay}秒待機して再試行します... (試行 {attempt + 2}/{MAX_RETRIES})", file=sys.stderr)
+                time.sleep(delay)
+            else:
+                print(f"エラー ({query_for_log}): 最大リトライ回数({MAX_RETRIES}回)を超えました。メインAPIコール失敗。", file=sys.stderr)
+                return None, None
+        except Exception as e:
+            print(f"\nストリームの処理中に予期せぬエラーが発生しました ({query_for_log}): {e}", file=sys.stderr)
+            return None, None
+    return None, None
+
+# (この関数は変更なし)
+def _blocking_count_tokens(api_key: str, model: str, contents: str) -> types.CountTokensResponse | None:
+    if not api_key: return None
+    try:
+        client = genai.Client(api_key=api_key)
+        return client.models.count_tokens(model=model, contents=contents)
+    except Exception as e:
+        print(f"\nトークン計算中にエラーが発生しました ({contents[:30]}...): {e}", file=sys.stderr)
+        return None
+
+# --- ▼▼▼ この関数が、ファイルへの書き込みまで担当するように修正 ▼▼▼ ---
+async def process_query_and_write_to_file(query: str, semaphore: asyncio.Semaphore, output_filename: str):
+    """
+    単一クエリを処理し、完了後、即座に結果をJSONファイルに追記する。
+    """
+    async with semaphore:
+        start_time = time.time()
+        query_for_log = query[25:50] + '...' if len(query) > 40 else query
+
+        prompt_template="""
+# 調査対象企業
+- {company_name}
+# 上記の企業について、ルールに従い、以下のJSON形式で出力してください。
+# 厳守すべきルール
+1. 入力された、会社名　住所の情報から、出力内容を特定してください。
+2. ファクトチェックの徹底:名称と住所を基に、正しい業種を再検証してください。
+3. 欠損情報の扱い:調査しても情報が見つからない場合は、項目の値を `不明` としてください。
+4. 以下の４つの主要調査項目のうち、２項目が見つからなければ、即座に調査を中止し、下記の「調査中断レポート」を出力してください。
+   主要調査項目（４項目）：`officialUrl`, `industry`, `email`, `tel`
+5. 上記4.に抵触しなかった場合のみ、収集した情報を下記の「通常調査レポート」の形式で出力してください。
+# 出力形式 (JSON)
+# 調査中断レポート
+```json
+{{
+  "status": "terminated",
+  "error": "Required information could not be found.",
+  "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+  "targetCompany": "{company_name}"
+}}```
+# 通常調査レポート
+```json
+{{
+  "status": "success",
+  "data": {{
+    "companyName": "企業の正式名称（string）",
+    "companyStatus": "企業の現在の状況（例：活動中, 閉鎖, 不明）（string）",
+    "address": "本社の所在地（string）",
+    "officialUrl": "公式サイトのURL（string）",
+    "industry": "主要な業種（string）",
+    "email": "メールアドレス（string）",
+    "tel": "代表電話番号（string）",
+    "fax": "代表FAX番号（string）",
+    "capital": "資本金（string）",
+    "founded": "設立年月（string）",
+    "businessSummary": "事業内容の簡潔な要約（string）",
+    "strengths": "企業の強みや特徴（string）"
+  }}
+}}```
+"""
+
+        full_contents = prompt_template.format(company_name=query)
+
+        input_tokens, thinking_tokens, answer_tokens = 0, 0, 0
+
+        input_key = await api_key_manager.get_next_key()
+        if input_key:
+            input_token_response = await asyncio.to_thread(
+                _blocking_count_tokens, input_key, 'gemini-2.5-flash', full_contents
+            )
+            if input_token_response: input_tokens = input_token_response.total_tokens
+
+        main_call_key = await api_key_manager.get_next_key()
+        if not main_call_key:
+            print(f"エラー ({query_for_log}): メイン処理用のAPIキーを取得できませんでした。", file=sys.stderr)
+            return None
+            
+        thinking_text, answer_text = await asyncio.to_thread(
+            _blocking_call_to_gemini, main_call_key, full_contents, query_for_log
+        )
+
+        if thinking_text is None and answer_text is None:
+            print(f"エラー ({query_for_log}): Geminiからの応答取得に失敗しました。", file=sys.stderr)
+            return None
+
+        if thinking_text:
+            thinking_key = await api_key_manager.get_next_key()
+            if thinking_key:
+                thinking_token_response = await asyncio.to_thread(
+                    _blocking_count_tokens, thinking_key, 'gemini-2.5-flash', thinking_text
+                )
+                if thinking_token_response: thinking_tokens = thinking_token_response.total_tokens
+
+        if answer_text:
+            answer_key = await api_key_manager.get_next_key()
+            if answer_key:
+                answer_token_response = await asyncio.to_thread(
+                    _blocking_count_tokens, answer_key, 'gemini-2.5-flash', answer_text
+                )
+                if answer_token_response: answer_tokens = answer_token_response.total_tokens
+
+        end_time = time.time()
+        time_tokens_info = {
+            "time": round(end_time - start_time, 2),
+            "input_tokens": input_tokens,
+            "thinking_tokens": thinking_tokens,
+            "answer_tokens": answer_tokens,
+            "total_tokens": input_tokens + thinking_tokens + answer_tokens
+        }
+
+        final_output = {}
+        try:
+            # --- ▼▼▼ ここが唯一の修正箇所です ▼▼▼ ---
+            
+            json_str = None
+            # 1. ```json ... ``` というブロックを、説明文ごと全文の中から探す (re.DOTALLで改行も対象に)
+            match = re.search(r"```json(.*)```", answer_text, re.DOTALL)
+            
+            if match:
+                # 2. ブロックが見つかった場合、その中身だけを抽出する (group(1))
+                json_str = match.group(1).strip()
+            else:
+                # 3. ブロックが見つからない場合（正常系）、応答全体がJSONだと仮定する
+                json_str = answer_text.strip()
+            
+            if not json_str:
+                raise json.JSONDecodeError("抽出後のJSON文字列が空です", "", 0)
+
+            final_output = json.loads(json_str)
+
+        except json.JSONDecodeError as e:
+            print(json_str)
+            print(f"NG_json_str") # デバッグ用
+            print(f"エラー ({query_for_log}): API応答のJSON解析に失敗しました: {e}", file=sys.stderr)
+            final_output = {
+                "status": "error",
+                "error": "Failed to parse API response",
+                "message": f"APIからの応答をJSONとして解析できませんでした。 raw_response: {answer_text}",
+                "raw_response": answer_text
+            }
+        
+        # --- ▲▲▲ ここまでが唯一の修正箇所です ▲▲▲ ---        
+        final_output["time_tokens"] = time_tokens_info
+        # --- ▼▼▼ ここからがファイル追記処理 ▼▼▼ ---
+
+        async with file_write_lock: # ロックを取得して、ファイルアクセスを排他制御
+            all_data = []
+            try:
+                # 既存のファイルを読み込む
+                if os.path.exists(output_filename) and os.path.getsize(output_filename) > 0:
+                    with open(output_filename, 'r', encoding='utf-8') as f:
+                        all_data = json.load(f)
+                        if not isinstance(all_data, list):
+                            all_data = []
+            except (json.JSONDecodeError, FileNotFoundError):
+                pass
+            
+            # 今回の結果を追加
+            all_data.append(final_output)
+            
+            # ファイルに書き戻す
+            try:
+                with open(output_filename, 'w', encoding='utf-8') as f:
+                    json.dump(all_data, f, indent=2, ensure_ascii=False)
+                print(f"({query_for_log}) 結果を {output_filename} に追記しました。", file=sys.stderr)
+            except IOError as e:
+                print(f"エラー ({query_for_log}): ファイル書き込みに失敗: {e}", file=sys.stderr)
+        
+        # 標準出力用に結果を返す
+        return final_output
+
+async def main():
+    parser = argparse.ArgumentParser(description="企業情報を検索し、結果をJSONで出力するアプリ")
+    parser.add_argument("query", nargs='?', default=None, help="検索対象の企業名と住所（単一実行モード時）")
+    parser.add_argument("--prompt-file", help="複数クエリが記述されたテキストファイルのパス（並列実行モード時）")
+    parser.add_argument("--parallel", type=int, default=5, help="最大並列実行数（デフォルト: 5）")
+    args = parser.parse_args()
+
+    output_filename = "output.json"
+    is_parallel_mode = bool(args.prompt_file)
+
+    if is_parallel_mode:
+        print(f"INFO: 並列実行モードで起動します (最大{args.parallel}並列)。", file=sys.stderr)
+        try:
+            with open(args.prompt_file, 'r', encoding='utf-8') as f:
+                queries = [line.strip() for line in f if line.strip()]
+            if not queries:
+                print(f"エラー: プロンプトファイル '{args.prompt_file}' が空です。", file=sys.stderr)
+                sys.exit(1)
+            print(f"INFO: {len(queries)}件のクエリをファイルから読み込みました。", file=sys.stderr)
+        except FileNotFoundError:
+            print(f"エラー: プロンプトファイルが見つかりません: {args.prompt_file}", file=sys.stderr)
+            sys.exit(1)
+        
+        semaphore = asyncio.Semaphore(args.parallel)
+        # 新しいタスク関数を呼び出す
+        tasks = [process_query_and_write_to_file(q, semaphore, output_filename) for q in queries]
+        # 全てのタスクの完了を待つ
+        results = await asyncio.gather(*tasks)
+        
+        successful_results = [res for res in results if res is not None]
+        print(f"\n--- 全タスク完了: {len(successful_results)} / {len(queries)} 件の処理に成功 ---", file=sys.stderr)
+        
+        # 最後に、標準出力にだけ全結果をまとめて表示する
+        print(json.dumps(successful_results, indent=2, ensure_ascii=False))
+        
+    else: # (単一実行モードも同様に修正)
+        if not args.query:
+            parser.error("単一実行モードでは 'query' 引数が必要です。")
+        print("INFO: 単一実行モードで起動します。", file=sys.stderr)
+        semaphore = asyncio.Semaphore(1)
+        # 新しいタスク関数を呼び出す
+        result = await process_query_and_write_to_file(args.query, semaphore, output_filename)
+        if result:
+            # 標準出力に結果を表示
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+
+if __name__ == "__main__":
+    exit_code = 0
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nプログラムが中断されました。", file=sys.stderr)
+        exit_code = 130
+    except Exception as e:
+        print(f"予期せぬ致命的なエラーが発生しました: {e}", file=sys.stderr)
+        exit_code = 1
+    finally:
+        api_key_manager.save_session()
+        print("[INFO] アプリケーション終了に伴いセッションを保存しました。", file=sys.stderr)
+        sys.exit(exit_code)
+
+
+---
+
+
+- フォルダ名: .
 - ファイル名: gemini_zukai.md
 - 内容:
 
@@ -4430,3 +5397,1384 @@ graph LR
     linkStyle 1,3,5,7,8,10 stroke:#A0A0A0,stroke-width:1.5px,color:black
 
 ```
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: input_data_sumple.txt
+- 内容:
+法人番号: 1010001074462 法人名: ダイレックス・ジャパン株式会社 住所: 大阪府大阪市西区新町１丁目２４番８号ノース四ツ橋ビル８Ｆ
+法人番号: 1010001091994 法人名: 原町製袋株式会社 住所: 大阪府大阪市中央区久太郎町４丁目１番３号
+法人番号: 1010001098016 法人名: 新日本サーマルセラミックス株式会社 住所: 大阪府堺市堺区戎島町４丁４５番地１ポルタスセンタービル１２階
+法人番号: 1010001098305 法人名: 株式会社エコクリエイト大阪 住所: 大阪府大阪市此花区北港白津２丁目４番１３号
+法人番号: 1010001111488 法人名: 株式会社Ｗａｃｈｙ 住所: 大阪府大阪市福島区福島１丁目１番４８－２５０３号
+法人番号: 1010001111876 法人名: 株式会社ＧＩＰ 住所: 大阪府大阪市中央区南船場２丁目５番１９号３階
+法人番号: 1010001116009 法人名: 株式会社グランドプロモーション 住所: 大阪府大阪市中央区南本町３丁目２番９号
+法人番号: 1010001120159 法人名: 株式会社太閤印刷 住所: 大阪府大阪市城東区中央２丁目１４番Ｃ－１１０８号
+法人番号: 1010001128805 法人名: 株式会社ドリームダイニング 住所: 大阪府大阪市天王寺区味原町１３番９号
+法人番号: 1010001130331 法人名: 株式会社クレッセント 住所: 大阪府堺市南区宮山台３丁１１番５号
+法人番号: 1010001137376 法人名: 株式会社ＳＮＯＰＥＳ 住所: 大阪府高石市千代田２丁目１５番５号
+法人番号: 1010001139372 法人名: ＭＩＴＡＳＵ株式会社 住所: 大阪府大阪市西区江戸堀２丁目１番１号江戸堀センタービル９階
+法人番号: 1010001141816 法人名: エーピーアイコンサルタンツ株式会社 住所: 大阪府大阪市淀川区宮原１丁目１３番５号
+法人番号: 1010001142120 法人名: リゾート・コミュニケーション株式会社 住所: 大阪府大阪市此花区北港緑地２丁目２番９８号
+法人番号: 1010001143894 法人名: インテグラル株式会社 住所: 大阪府大阪市中央区高津１丁目３－８－１１０７
+法人番号: 1010001146906 法人名: ＡＯＩ　ＣＲＥＡＴＩＶＥ　ＭＡＮＡＧＥＭＥＮＴ株式会社 住所: 大阪府大阪市此花区西九条１丁目３番３７号
+法人番号: 1010001148398 法人名: ＳＩＫＩ株式会社 住所: 大阪府大阪市浪速区稲荷１丁目７番２号３Ｆ
+法人番号: 1010001149363 法人名: 株式会社コミス 住所: 大阪府大阪市平野区加美北１丁目１６－１４－２階
+法人番号: 1010001149677 法人名: 株式会社アイテック 住所: 大阪府吹田市南吹田５丁目２６番２８号
+法人番号: 1010001150759 法人名: 株式会社ＳＫホールディングス 住所: 大阪府和泉市和気町２丁目３番１号
+法人番号: 1010001151154 法人名: 株式会社ドレスアンドコー 住所: 大阪府大阪市浪速区湊町１丁目２番３号マルイト難波ビル１１階
+法人番号: 1010001153695 法人名: ハックベンチャーズ株式会社 住所: 大阪府大阪市北区角田町８番４７号阪急グランドビル２６階
+法人番号: 1010001154751 法人名: キャスタック株式会社 住所: 大阪府大阪市天王寺区生玉前町１番２６号情報センタービル３０１
+法人番号: 1010001155238 法人名: 株式会社シリコンバレーテック 住所: 大阪府東大阪市小阪３丁目５番８－１００１号
+法人番号: 1010001160502 法人名: 株式会社エコテック 住所: 大阪府大阪市中央区南船場２丁目６番１０号ツチノビル８階
+法人番号: 1010001162003 法人名: サマーバケーション株式会社 住所: 大阪府大阪市北区大深町４番２０号グランフロント大阪タワーＡ
+法人番号: 1010001162317 法人名: 株式会社Ｈａｎａプラス 住所: 大阪府大阪市中央区南久宝寺町２丁目６番５号
+法人番号: 1010001162515 法人名: 株式会社ＪＵＮＹＡ　ＷＡＲＡＳＨＩＮＡ 住所: 大阪府大阪市西区西本町１丁目１３番９号
+法人番号: 1010001163637 法人名: ゴイク電池株式会社 住所: 大阪府大阪市淀川区西中島５丁目１３番１２号
+法人番号: 1010001163835 法人名: 株式会社ＢＦＩ 住所: 大阪府東大阪市御厨西ノ町２丁目１－３
+
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: LICENSE.md
+- 内容:
+MIT License
+
+Copyright (c) 2025 Taro.AI
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: out.json
+- 内容:
+[
+  {
+    "status": "success",
+    "data": {
+      "companyName": "ダイレックス・ジャパン株式会社",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市西区新町１丁目２４番８号ノース四ツ橋ビル８Ｆ",
+      "officialUrl": "https://www.direxgroup.com/ja/",
+      "industry": "医療機器・器具専門商社",
+      "email": "contact@direxjp.co.jp",
+      "tel": "06-6585-7274",
+      "fax": "06-6585-7275",
+      "capital": "5,755万円",
+      "founded": "1991年4月",
+      "businessSummary": "医療機器の輸入・卸売、医療機器アフターサービス事業を行っています。主にイニシア・メディカル・テクノロジー社の前立腺温熱治療装置、移動型X線撮影装置、脳定位放射線治療装置などの医療機器の輸入販売、および外国製造医療機器の国内管理業、医療機器の修理業を手掛けています。",
+      "strengths": "ダイレックスグループの一員として、40年以上にわたり医療技術革新の最前線に立ち、結石破砕装置などの医療機器の輸入および卸売を行っています。革新的な技術、多様な治療プラットフォーム、ユーザー目線での技術開発、医療機関とのパートナーシップを通じて、メンズヘルス、ウィメンズヘルス、血管疾患、腎臓疾患、円形脱毛症、美容、筋骨格系疾患など、7つの異なる治療分野に対応した安全かつ費用対効果の高い治療ソリューションを提供しています。"
+    },
+    "time_tokens": {
+      "time": 33.06,
+      "input_tokens": 551,
+      "thinking_tokens": 992,
+      "answer_tokens": 400,
+      "all_tokens": 1943
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "ダイレックス・ジャパン株式会社",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市西区新町１丁目２４番８号ノース四ツ橋ビル８Ｆ",
+      "officialUrl": "http://www.direxgroup.com/ja/",
+      "industry": "医療機器の輸入・卸売、医療機器・器具専門商社",
+      "email": "contact@direxjp.co.jp",
+      "tel": "06-6585-7274",
+      "fax": "06-6585-7275",
+      "capital": "5755万円",
+      "founded": "1991年4月",
+      "businessSummary": "医療機器の輸入・卸売を手掛けており、医療機器輸入販売事業と医療機器アフターサービス事業に従事しています。主な取扱製品には、結石破砕装置、前立腺温熱治療装置、脳定位放射線治療装置などの医療機器があります。 [3, 8, 10, 14, 20]",
+      "strengths": "国際的なヘルスケアおよび治療機器分野での40年以上の経験を持ち、革新的な技術を提供しています。多様な治療分野（メンズヘルス、ウィメンズヘルス、血管、筋骨格系疾患など）に対応する治療プラットフォーム、ユーザー目線による技術開発、医療機関とのパートナーシップ、そして安全かつ費用対効果の高い治療ソリューションが強みです。 [20]"
+    },
+    "time_tokens": {
+      "time": 22.32,
+      "input_tokens": 551,
+      "thinking_tokens": 508,
+      "answer_tokens": 376,
+      "all_tokens": 1435
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "ダイレックス・ジャパン株式会社",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市西区新町１丁目２４番８号ノース四ツ橋ビル８Ｆ",
+      "officialUrl": "http://www.direxgroup.com/ja/",
+      "industry": "医療機器専門商社",
+      "email": "contact@direxjp.co.jp",
+      "tel": "03-6811-0431",
+      "fax": "03-6811-0432",
+      "capital": "57,550,000円",
+      "founded": "1991年4月",
+      "businessSummary": "医療機器の輸入・卸売、医療機器アフターサービス、および外国製造医療機器の国内管理業、医療機器修理業を手掛けています。主な取扱製品には、前立腺温熱治療装置、移動型X線撮影装置、脳定位放射線治療装置などがあります。 [3, 19]",
+      "strengths": "40年以上にわたり医療技術革新の最前線に立ち、世界初の結石破砕装置や初のリニア衝撃波治療システムの開発に携わってきました。多様な治療分野に対応した革新的な製品を提供し、安全かつ費用対効果の高いソリューション、そして医療機器商社としての一貫したサービス提供を強みとしています。 [3, 12]"
+    },
+    "time_tokens": {
+      "time": 34.91,
+      "input_tokens": 551,
+      "thinking_tokens": 1231,
+      "answer_tokens": 365,
+      "total_tokens": 2147
+    }
+  }
+]
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: output.json
+- 内容:
+[
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001111488 法人名: 株式会社Ｗａｃｈｙ 住所: 大阪府大阪市福島区福島１丁目１番４８－２５０３号",
+    "time_tokens": {
+      "time": 18.98,
+      "input_tokens": 580,
+      "thinking_tokens": 365,
+      "answer_tokens": 111,
+      "total_tokens": 1056
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001116009 法人名: 株式会社グランドプロモーション 住所: 大阪府大阪市中央区南本町３丁目２番９号",
+    "time_tokens": {
+      "time": 23.47,
+      "input_tokens": 568,
+      "thinking_tokens": 564,
+      "answer_tokens": 105,
+      "total_tokens": 1237
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001120159 法人名: 株式会社太閤印刷 住所: 大阪府大阪市城東区中央２丁目１４番Ｃ－１１０８号",
+    "time_tokens": {
+      "time": 26.82,
+      "input_tokens": 578,
+      "thinking_tokens": 715,
+      "answer_tokens": 110,
+      "total_tokens": 1403
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "新日本サーマルセラミックス株式会社",
+      "companyStatus": "活動中",
+      "address": "大阪府堺市堺区戎島町４丁４５番地１ポルタスセンタービル１２階",
+      "officialUrl": "http://www.thermalceramics.co.jp",
+      "industry": "セラミックス製造、耐火材料製造、断熱材製造、窯業建材・石材製造",
+      "email": "不明",
+      "tel": "072-341-8515",
+      "fax": "072-341-8517",
+      "capital": "4億9000万円 （2021年4月1日現在）",
+      "founded": "1997年4月1日",
+      "businessSummary": "高耐熱・耐火無機繊維「スーパーウール」など、優れた耐熱素材と耐火断熱材料の製造・販売を行っています。主に自動車部材、鉄鋼、建材、プラント、船舶など多様な用途に製品を提供しています。",
+      "strengths": "人体に健康被害を与えない生体溶解性ファイバー「スーパーウール」を主力製品とし、高温環境における省エネルギー実現に貢献しています。熱に関わるセラミックス分野における高い技術力と優れた耐火性・断熱性が強みです。"
+    },
+    "time_tokens": {
+      "time": 27.51,
+      "input_tokens": 594,
+      "thinking_tokens": 705,
+      "answer_tokens": 345,
+      "total_tokens": 1644
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001091994 法人名: 原町製袋株式会社 住所: 大阪府大阪市中央区久太郎町４丁目１番３号",
+    "time_tokens": {
+      "time": 28.03,
+      "input_tokens": 570,
+      "thinking_tokens": 768,
+      "answer_tokens": 106,
+      "total_tokens": 1444
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "株式会社ＧＩＰ",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市中央区南船場二丁目5番19号3階",
+      "officialUrl": "http://www.gip-web.co.jp/",
+      "industry": "中小企業向け経営コンサルタント事業、セールスプロモーション（広告宣伝）事業、WEBインテグレーション事業、高度管理医療機器等販売・賃貸事業（AED販売など）",
+      "email": "不明",
+      "tel": "03-6808-1491",
+      "fax": "03-3546-0533",
+      "capital": "2,000万円",
+      "founded": "2000年12月",
+      "businessSummary": "製造業、不動産業、アミューズメント業界など幅広い業種の中小企業に対し、経営コンサルティング、経営支援を提供しています。また、総合広告代理業として新聞、雑誌、インターネット広告などの各種媒体を取り扱い、WEBインテグレーション業務も行っています。さらに、各種医療機関や学校向けの活動支援実績があり、高度管理医療機器の販売・賃貸（AED等）も手掛けています。",
+      "strengths": "幅広い業種（製造業、不動産業、アミューズメント業界など）への経営コンサルティング実績。医療機関や学校向けの活動支援に強み。総合広告代理業とWEBインテグレーションを兼ね備える。高度管理医療機器（AEDなど）の販売・賃貸許可を保有。"
+    },
+    "time_tokens": {
+      "time": 28.6,
+      "input_tokens": 574,
+      "thinking_tokens": 739,
+      "answer_tokens": 390,
+      "total_tokens": 1703
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "株式会社ドリームダイニング",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市天王寺区味原町１３番９号",
+      "officialUrl": "http://www.ttt-dream-d.com/",
+      "industry": "飲食店の経営（韓国料理店「Korean Kitchen まだん」、やきとり「中村屋」の運営・開発など）",
+      "email": "不明",
+      "tel": "06-6795-4721",
+      "fax": "不明",
+      "capital": "40,000,000円",
+      "founded": "平成20年4月8日",
+      "businessSummary": "韓国料理店「Korean Kitchen まだん」や居酒屋「博多BARU中村屋」などの飲食店経営を中心に、飲食店の経営に関するコンサルティング業務、フランチャイズチェーンシステムの運営、寿司・刺身の製造卸売り、ケータリング事業なども手掛けています。 [3, 4, 7, 11, 17, 21]",
+      "strengths": "「美味しんぼ」にも紹介された韓国料理「まだん」の運営で、大阪・兵庫エリアでの食文化に貢献しています。こだわりの博多鶏鍋や炭火串焼など、幅広いニーズに対応できる店舗展開が強みです。 [21]"
+    },
+    "time_tokens": {
+      "time": 32.82,
+      "input_tokens": 570,
+      "thinking_tokens": 1202,
+      "answer_tokens": 346,
+      "total_tokens": 2118
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "株式会社エコクリエイト大阪",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市此花区北港白津２丁目４番１３号",
+      "officialUrl": "https://www.eco-create.osaka/",
+      "industry": "産業廃棄物処理施設の運営・維持管理、環境・廃棄物処理、環境衛生サービス",
+      "email": "不明",
+      "tel": "06-6462-5192",
+      "fax": "06-6462-5193",
+      "capital": "6,000万円",
+      "founded": "2006年3月",
+      "businessSummary": "産業廃棄物処理施設の運営・維持管理、設計・製作・据付、点検・補修、薬剤・溶剤・触媒等の取扱業務、化学分析・環境測定分析、環境に関するコンサルティング業務を行っています。特に、国策事業として近畿2府4県のPCB廃棄物処理を担う大阪PCB廃棄物処理施設の運転・管理業務を受託しています。",
+      "strengths": "PCB（ポリ塩化ビフェニル）を無害化する特殊な処理技術（真空加熱分離法、触媒水素化脱塩素化分解法）を有しており、国策事業である大阪PCB廃棄物処理施設の運営・管理を受託する専門技術力が強みです。"
+    },
+    "time_tokens": {
+      "time": 33.24,
+      "input_tokens": 578,
+      "thinking_tokens": 1112,
+      "answer_tokens": 350,
+      "total_tokens": 2040
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001130331 法人名: 株式会社クレッセント 住所: 大阪府堺市南区宮山台３丁１１番５号",
+    "time_tokens": {
+      "time": 37.86,
+      "input_tokens": 570,
+      "thinking_tokens": 1332,
+      "answer_tokens": 106,
+      "total_tokens": 2008
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "ダイレックス・ジャパン株式会社",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市西区新町１丁目２４番８号ノース四ツ橋ビル８Ｆ",
+      "officialUrl": "http://www.direxgroup.com/ja/%E4%BC%81%E6%A5%AD%E6%83%85%E5%A0%B1/%E3%83%80%E3%82%A4%E3%83%AC%E3%83%83%E3%82%AF%E3%82%B9%E3%83%BB%E3%82%B8%E3%83%A3%E3%83%91%E3%83%B3%E4%BC%9A%E7%A4%BE%E6%A6%82%E8%A6%81",
+      "industry": "医療機器の輸入・卸売、医療機器アフターサービス",
+      "email": "contact@direxjp.co.jp",
+      "tel": "06-6585-7274",
+      "fax": "不明",
+      "capital": "5,755万円",
+      "founded": "1991年4月",
+      "businessSummary": "医療機器の輸入・卸売、および医療機器アフターサービスを手掛けています。特に、DirexGroupのグループ会社として、前立腺温熱治療装置、体外衝撃波結石破砕装置、脳定位放射線治療装置などの医療機器の輸入販売、国内管理業、修理業を行っています。 [14]",
+      "strengths": "医療技術革新の最前線に40年以上立ち、世界初の結石破砕装置開発から始まりました。多様な治療分野（メンズヘルス、ウィメンズヘルス、血管疾患、腎臓疾患、円形脱毛症、美容、筋骨格系疾患など）に対応する製品を提供しており、革新的な技術、ユーザー目線の技術開発、最先端の技術、医療機関とのパートナーシップ、安全かつ低価格のソリューションが強みです。 [9] 医療機器商社としての地位を確立し、一貫したサービス提供に努めています。 [12]"
+    },
+    "time_tokens": {
+      "time": 41.28,
+      "input_tokens": 588,
+      "thinking_tokens": 1544,
+      "answer_tokens": 569,
+      "total_tokens": 2701
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001137376 法人名: 株式会社ＳＮＯＰＥＳ 住所: 大阪府高石市千代田２丁目１５番５号",
+    "time_tokens": {
+      "time": 23.6,
+      "input_tokens": 572,
+      "thinking_tokens": 545,
+      "answer_tokens": 107,
+      "total_tokens": 1224
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001139372 法人名: ＭＩＴＡＳＵ株式会社 住所: 大阪府大阪市西区江戸堀２丁目１番１号江戸堀センタービル９階",
+    "time_tokens": {
+      "time": 28.19,
+      "input_tokens": 586,
+      "thinking_tokens": 928,
+      "answer_tokens": 114,
+      "total_tokens": 1628
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001146906 法人名: ＡＯＩ　ＣＲＥＡＴＩＶＥ　ＭＡＮＡＧＥＭＥＮＴ株式会社 住所: 大阪府大阪市此花区西九条１丁目３番３７号",
+    "time_tokens": {
+      "time": 25.52,
+      "input_tokens": 620,
+      "thinking_tokens": 894,
+      "answer_tokens": 131,
+      "total_tokens": 1645
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001143894 法人名: インテグラル株式会社 住所: 大阪府大阪市中央区高津１丁目３－８－１１０７",
+    "time_tokens": {
+      "time": 27.26,
+      "input_tokens": 576,
+      "thinking_tokens": 750,
+      "answer_tokens": 93,
+      "total_tokens": 1419
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001141816 法人名: エーピーアイコンサルタンツ株式会社 住所: 大阪府大阪市淀川区宮原１丁目１３番５号",
+    "time_tokens": {
+      "time": 28.62,
+      "input_tokens": 578,
+      "thinking_tokens": 786,
+      "answer_tokens": 431,
+      "total_tokens": 1795
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "リゾート・コミュニケーション株式会社",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市此花区北港緑地２丁目２番９８号",
+      "officialUrl": "http://www.rcom.jp/",
+      "industry": "リゾート関連サービス、広告代理業、旅行業",
+      "email": "不明",
+      "tel": "06-6463-7282",
+      "fax": "06-6463-7283",
+      "capital": "1,505万円",
+      "founded": "2011年9月",
+      "businessSummary": "リゾート施設の運営に関するコンサルティング、アミューズメント施設の運営管理、集客イベントの企画・運営、広報活動のサポートを提供しています。また、総合広告代理業や旅行会社の運営、広告クリエイティブ事業、イベントプロデュース事業、営業支援サービス事業、インターネット販売事業も展開しています。",
+      "strengths": "高品質なリゾート施設の運営、リラクゼーションや健康促進を重視したプログラムの充実、イベントやアクティビティの企画・運営に強みを持っています。"
+    },
+    "time_tokens": {
+      "time": 28.58,
+      "input_tokens": 576,
+      "thinking_tokens": 929,
+      "answer_tokens": 300,
+      "total_tokens": 1805
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001149363 法人名: 株式会社コミス 住所: 大阪府大阪市平野区加美北１丁目１６－１４－２階",
+    "time_tokens": {
+      "time": 27.76,
+      "input_tokens": 576,
+      "thinking_tokens": 958,
+      "answer_tokens": 109,
+      "total_tokens": 1643
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001149677 法人名: 株式会社アイテック 住所: 大阪府吹田市南吹田５丁目２６番２８号",
+    "time_tokens": {
+      "time": 23.73,
+      "input_tokens": 568,
+      "thinking_tokens": 708,
+      "answer_tokens": 105,
+      "total_tokens": 1381
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "ＳＩＫＩ株式会社",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市浪速区稲荷１丁目７番２号３Ｆ",
+      "officialUrl": "https://siki-inc.com/",
+      "industry": "健康食品・化粧品の研究・卸・販売、インターネット通信販売、D2Cサブスクリプションサービス、中小企業向け成長支援（M&A・資金調達・EC/OEM支援）",
+      "email": "info@galleido.jp",
+      "tel": "050-3310-9603",
+      "fax": "06-6777-7057",
+      "capital": "8090万円",
+      "founded": "2012年8月",
+      "businessSummary": "ＳＩＫＩ株式会社は、大阪府を拠点に健康食品・化粧品の研究、卸、販売を行う企業です。主な事業として、メンズコスメブランド「GALLEIDO」を展開し、「GALLEIDO DENTAL MEMBER」（電動歯ブラシ）、「GALLEIDO SHAVING MEMBER」（カミソリ）、「GALLEIDO SHOWER MEMBER」（シャワーヘッド）などの日用品D2Cサブスクリプションサービスを提供しています。また、完全栄養食「GALLEIDO SMART FOOD」の販売や、マウスピース矯正紹介サービス「GALLEIDO DENTAL Aso Aligner」、福利厚生サービス「GALLEIDO OFFICE」も手掛けています。さらに、中小企業のM&A・資金調達・新規事業開発の支援、海外OEM代行、EC運用・マーケティングサポートといったB2B事業も展開しています。",
+      "strengths": "「感動体験を通じて、人々を笑顔に」をミッションに掲げ、日用品D2Cサブスクリプションサービス「GALLEIDO」ブランドの展開に強みを持っています。特に電動歯ブラシサブスクリプションの利用者を拡大しており、日用品D2Cサブスクリプション分野でのリーディングカンパニーを目指しています。また、中小企業に対するM&A、資金調達、新規事業開発、ブランド支援、海外OEM、EC運用・マーケティングなど、多角的な成長支援の実績も有しています。"
+    },
+    "time_tokens": {
+      "time": 30.34,
+      "input_tokens": 576,
+      "thinking_tokens": 1148,
+      "answer_tokens": 524,
+      "total_tokens": 2248
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001150759 法人名: 株式会社ＳＫホールディングス 住所: 大阪府和泉市和気町２丁目３番１号",
+    "time_tokens": {
+      "time": 25.32,
+      "input_tokens": 570,
+      "thinking_tokens": 970,
+      "answer_tokens": 106,
+      "total_tokens": 1646
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001151154 法人名: 株式会社ドレスアンドコー 住所: 大阪府大阪市浪速区湊町１丁目２番３号マルイト難波ビル１１階",
+    "time_tokens": {
+      "time": 27.4,
+      "input_tokens": 584,
+      "thinking_tokens": 1005,
+      "answer_tokens": 113,
+      "total_tokens": 1702
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001154751 法人名: キャスタック株式会社 住所: 大阪府大阪市天王寺区生玉前町１番２６号情報センタービル３０１",
+    "time_tokens": {
+      "time": 18.09,
+      "input_tokens": 584,
+      "thinking_tokens": 409,
+      "answer_tokens": 113,
+      "total_tokens": 1106
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "ハックベンチャーズ株式会社",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市北区角田町８番４７号阪急グランドビル２６階",
+      "officialUrl": "https://www.hack-ventures.com/",
+      "industry": "ベンチャーキャピタル事業",
+      "email": "不明",
+      "tel": "06-6105-1395",
+      "fax": "06-6105-1395",
+      "capital": "不明",
+      "founded": "2013年5月1日",
+      "businessSummary": "関西を基盤としつつ、米国シリコンバレーなどの最先端地域と密な連携を取ることにより、ITによる産業革新の波を引き寄せ、日本／関西に世界的に競争力のある事業を創造することを目指す独立系ベンチャーキャピタルファンドです。IoT（Internet of Things）/IoE（Internet of Everything）分野を投資対象としています。 [1, 2, 3, 4, 12, 13, 15]",
+      "strengths": "シリコンバレーとの連携によるグローバルネットワークと知見、ハンズオン支援、豊富な投資経験を持つメンバーによる構成、大阪府などがLP（有限責任組合員）として参画していることによる行政へのロビー活動の有利さ。また、コワーキングスペースの運営も行っています。 [2, 4, 13, 14, 15]"
+    },
+    "time_tokens": {
+      "time": 27.72,
+      "input_tokens": 584,
+      "thinking_tokens": 772,
+      "answer_tokens": 397,
+      "total_tokens": 1753
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "サマーバケーション株式会社",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市北区大深町４番２０号グランフロント大阪タワーＡ",
+      "officialUrl": "https://www.summer-vacation.jp",
+      "industry": "スマートフォン向けアプリケーションの開発",
+      "email": "不明",
+      "tel": "06-6485-3260",
+      "fax": "不明",
+      "capital": "900万円",
+      "founded": "2014年7月22日",
+      "businessSummary": "スマートフォン向けゲームアプリの企画、開発、運営を行っています。 [12, 15]",
+      "strengths": "スマートフォン向けゲームアプリの企画・開発・運営を主な事業とし、「あのころのワクワクをもう一度」をミッションに掲げ、ワクワクするゲームを提供しています。 [15] 基本フルリモートワークを採用しており、自己管理能力と主体的な業務推進力を持つ個人にとって働きやすい環境です。 [12]"
+    },
+    "time_tokens": {
+      "time": 24.69,
+      "input_tokens": 580,
+      "thinking_tokens": 878,
+      "answer_tokens": 274,
+      "total_tokens": 1732
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001160502 法人名: 株式会社エコテック 住所: 大阪府大阪市中央区南船場２丁目６番１０号ツチノビル８階",
+    "time_tokens": {
+      "time": 27.6,
+      "input_tokens": 580,
+      "thinking_tokens": 1114,
+      "answer_tokens": 111,
+      "total_tokens": 1805
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001162317 法人名: 株式会社Ｈａｎａプラス 住所: 大阪府大阪市中央区南久宝寺町２丁目６番５号",
+    "time_tokens": {
+      "time": 25.79,
+      "input_tokens": 576,
+      "thinking_tokens": 633,
+      "answer_tokens": 109,
+      "total_tokens": 1318
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001155238 法人名: 株式会社シリコンバレーテック 住所: 大阪府東大阪市小阪３丁目５番８－１００１号",
+    "time_tokens": {
+      "time": 32.39,
+      "input_tokens": 578,
+      "thinking_tokens": 1152,
+      "answer_tokens": 110,
+      "total_tokens": 1840
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001163835 法人名: 株式会社ＢＦＩ 住所: 大阪府東大阪市御厨西ノ町２丁目１－３",
+    "time_tokens": {
+      "time": 22.01,
+      "input_tokens": 568,
+      "thinking_tokens": 710,
+      "answer_tokens": 105,
+      "total_tokens": 1383
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "ゴイク電池株式会社",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市淀川区西中島５丁目１３番１２号",
+      "officialUrl": "https://goiku.com/",
+      "industry": "電池技術開発・販売",
+      "email": "不明",
+      "tel": "06-4805-8728",
+      "fax": "06-4805-8722",
+      "capital": "81,100,000円",
+      "founded": "2014年10月16日",
+      "businessSummary": "電池診断装置、バッテリー・マネジメント・システム（BMS）、急速充電装置などの開発・販売、および電池応用技術の開発・販売を手掛けています。特にEV（電気自動車）用バッテリーの診断技術に強みを持っています。",
+      "strengths": "世界初の蓄電性能診断システムの特許技術を有し、電池の劣化度や残量をわずか1秒で測定できる技術、および急速充電技術が強みです。EV車の廃バッテリーの選別や再利用に貢献する技術を確立しています。"
+    },
+    "time_tokens": {
+      "time": 26.01,
+      "input_tokens": 574,
+      "thinking_tokens": 714,
+      "answer_tokens": 303,
+      "total_tokens": 1591
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "株式会社ＪＵＮＹＡ　ＷＡＲＡＳＨＩＮＡ",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市西区西本町１丁目１３番９号",
+      "officialUrl": "https://junyawarashina.com",
+      "industry": "高級皮革製品の製造・販売、ファッションデザイン",
+      "email": "mail@junyawarashina.com",
+      "tel": "06-6543-5175",
+      "fax": "不明",
+      "capital": "不明",
+      "founded": "不明",
+      "businessSummary": "デザイナー藁科順也が2014年に設立したブランドで、ロンドン芸術大学セントマーチン大学院でファッションデザインを学んだ経験と着物作家への師事を得て、オートクチュールバッグや高級皮革製品の製作を手掛けています。最高品質の素材と熟練した職人による比類なき製品を提供しています。",
+      "strengths": "希少な素材と秘伝のタンニング・染色技術を用いた高級皮革製品の製造 [4]、ロンドン芸術大学セントマーチン大学院出身のデザイナーによる独創的なデザイン [4]、海外王室やピアニストからの依頼を受けるオートクチュールバッグの製作 [4]、熟練した職人による丁寧な仕立てと比類なき製品 [4, 5, 10]"
+    },
+    "time_tokens": {
+      "time": 27.71,
+      "input_tokens": 596,
+      "thinking_tokens": 798,
+      "answer_tokens": 358,
+      "total_tokens": 1752
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001111488 法人名: 株式会社Ｗａｃｈｙ 住所: 大阪府大阪市福島区福島１丁目１番４８－２５０３号",
+    "time_tokens": {
+      "time": 21.61,
+      "input_tokens": 580,
+      "thinking_tokens": 428,
+      "answer_tokens": 111,
+      "total_tokens": 1119
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001091994 法人名: 原町製袋株式会社 住所: 大阪府大阪市中央区久太郎町４丁目１番３号",
+    "time_tokens": {
+      "time": 23.06,
+      "input_tokens": 570,
+      "thinking_tokens": 580,
+      "answer_tokens": 106,
+      "total_tokens": 1256
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001116009 法人名: 株式会社グランドプロモーション 住所: 大阪府大阪市中央区南本町３丁目２番９号",
+    "time_tokens": {
+      "time": 24.68,
+      "input_tokens": 568,
+      "thinking_tokens": 709,
+      "answer_tokens": 105,
+      "total_tokens": 1382
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001130331 法人名: 株式会社クレッセント 住所: 大阪府堺市南区宮山台３丁１１番５号",
+    "time_tokens": {
+      "time": 25.69,
+      "input_tokens": 570,
+      "thinking_tokens": 728,
+      "answer_tokens": 106,
+      "total_tokens": 1404
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001120159 法人名: 株式会社太閤印刷 住所: 大阪府大阪市城東区中央２丁目１４番Ｃ－１１０８号",
+    "time_tokens": {
+      "time": 26.82,
+      "input_tokens": 578,
+      "thinking_tokens": 786,
+      "answer_tokens": 110,
+      "total_tokens": 1474
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "株式会社ＧＩＰ",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市中央区南船場２丁目５番１９号３階",
+      "officialUrl": "http://g-i-p.jp",
+      "industry": "経営コンサルタント業、広告代理業、医療器具販売業",
+      "email": "不明",
+      "tel": "03-6808-1491",
+      "fax": "03-3546-0533",
+      "capital": "2,000万円",
+      "founded": "平成12年12月",
+      "businessSummary": "中小企業向けの経営コンサルタント事業、広告クリエイティブ事業、WEBインテグレーション事業、医療器具販売事業を展開しています。 [2, 3, 10]",
+      "strengths": "中小企業向けの経営コンサルティング・支援実績が豊富です。医療機関や学校向けの活動支援実績があり、製造業、不動産業、アミューズメント業界など幅広い業種へのコンサルティングに対応しています。また、新聞・雑誌・インターネット広告・携帯広告・交通広告など、各種メディアを幅広く取り扱う総合広告代理業も強みとしています。 [2, 3, 10, 17]"
+    },
+    "time_tokens": {
+      "time": 28.29,
+      "input_tokens": 574,
+      "thinking_tokens": 766,
+      "answer_tokens": 332,
+      "total_tokens": 1672
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "新日本サーマルセラミックス株式会社",
+      "companyStatus": "活動中",
+      "address": "大阪府堺市堺区戎島町４丁４５番地１ポルタスセンタービル１２階",
+      "officialUrl": "http://www.thermalceramics.co.jp/",
+      "industry": "セラミック製品製造業、耐火材料製造業",
+      "email": "不明",
+      "tel": "072-341-8515",
+      "fax": "072-341-8517",
+      "capital": "4億9000万円",
+      "founded": "1997年4月1日",
+      "businessSummary": "新日本サーマルセラミックス株式会社は、セラミックファイバーおよびその加工品の製造・販売を行う企業です。特に、高耐熱・耐火無機繊維である「スーパーウール」を主力製品とし、高温環境における断熱・保温性能向上による省エネルギー化に貢献しています。自動車部材、鉄鋼、建材、プラント、船舶など多岐にわたる分野で製品を提供しています。 [4, 6, 7, 10, 12, 19]",
+      "strengths": "主力製品である「スーパーウール」は、人体に健康被害を与えない生体内低残存性繊維であり、日本やEUを含む各国のリフラクトリーセラミックファイバー規制に非該当です。 [6, 7] 1000℃以上の耐熱性を持ち、高温性能が要求される特殊紙、不織布、摩擦材、複合材、塗料などの原料として最適です。 [6, 10, 19] また、ブランケット、テキスタイル、ボードなどの成形加工された耐火断熱材を供給可能であり、優れた耐熱衝撃性により設備の長寿命化や省エネルギーを実現します。 [6, 10, 19]"
+    },
+    "time_tokens": {
+      "time": 28.52,
+      "input_tokens": 594,
+      "thinking_tokens": 772,
+      "answer_tokens": 472,
+      "total_tokens": 1838
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "ダイレックス・ジャパン株式会社",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市西区新町１丁目２４番８号ノース四ツ橋ビル８Ｆ",
+      "officialUrl": "http://www.direxgroup.com/ja/",
+      "industry": "医療機器・器具専門商社",
+      "email": "contact@direxjp.co.jp",
+      "tel": "06-6585-7274",
+      "fax": "不明",
+      "capital": "57,550,000円",
+      "founded": "1991年4月",
+      "businessSummary": "医療機器の輸入・卸売、および医療機器のアフターサービスを手掛けています。特に、前立腺温熱治療装置、体外衝撃波結石破砕装置、脳定位放射線治療装置などの医療機器の取り扱いを行っています。 [3, 5, 24]",
+      "strengths": "40年以上にわたり医療技術革新の最前線に立ち、世界初の結石破砕装置の開発から低エネルギー衝撃波治療システムなど多様な製品を提供しています。医療機関とのパートナーシップを重視し、安全かつ費用対効果の高い治療ソリューションを提供しています。 [3, 21]"
+    },
+    "time_tokens": {
+      "time": 29.15,
+      "input_tokens": 588,
+      "thinking_tokens": 837,
+      "answer_tokens": 334,
+      "total_tokens": 1759
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "株式会社エコクリエイト大阪",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市此花区北港白津２丁目４番１３号",
+      "officialUrl": "http://www.ecoo.co.jp/",
+      "industry": "産業廃棄物処理施設の運営・維持管理",
+      "email": "不明",
+      "tel": "06-6462-5192",
+      "fax": "06-6462-5193",
+      "capital": "6,000万円",
+      "founded": "2006年3月17日",
+      "businessSummary": "産業廃棄物処理施設の運転および維持管理業務、設計・製作・据付ならびに点検・補修、薬剤・溶剤・触媒等の取扱業務、化学分析および環境測定分析等の業務ならびに監督、コンサルタント業務。特に、国策事業として近畿2府4県のPCB廃棄物処理を担う大阪PCB廃棄物処理施設の運転・管理業務を受託しています。 [2, 3, 4, 8, 9]",
+      "strengths": "PCB（ポリ塩化ビフェニル）を無害化する特殊な処理技術を有し、国策事業として近畿2府4県のPCB廃棄物処理を担う大阪PCB廃棄物処理施設の運営・管理業務を受託している点です。 [3, 8, 9]"
+    },
+    "time_tokens": {
+      "time": 33.81,
+      "input_tokens": 578,
+      "thinking_tokens": 1133,
+      "answer_tokens": 365,
+      "total_tokens": 2076
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "株式会社ドリームダイニング",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市天王寺区味原町１３番９号",
+      "officialUrl": "http://www.ttt-dream-d.com/",
+      "industry": "飲食店の経営",
+      "email": "不明",
+      "tel": "06-6795-4721",
+      "fax": "不明",
+      "capital": "40,000,000円",
+      "founded": "2008年4月8日",
+      "businessSummary": "韓国料理「Korean Kitchen まだん」や焼き鳥「中村屋」などの飲食店経営を中心に、寿司・刺身の製造卸売り、ケータリング、イベント企画、食品の製造卸売り、コンサルティング業務など、幅広い飲食関連事業を展開しています。 [3, 4, 5, 6, 8, 22]",
+      "strengths": "韓国料理「Korean Kitchen まだん」は人気漫画「美味しんぼ」に登場した実績があり、関西エリアを中心に多様な飲食ブランドを展開しています。また、寿司・刺身の製造卸やケータリング事業も手掛け、幅広い食のニーズに対応できる点が強みです。 [4, 5, 8, 15, 22]"
+    },
+    "time_tokens": {
+      "time": 44.63,
+      "input_tokens": 570,
+      "thinking_tokens": 1583,
+      "answer_tokens": 337,
+      "total_tokens": 2490
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "株式会社ＳＮＯＰＥＳ",
+      "companyStatus": "活動中",
+      "address": "大阪府高石市千代田２丁目１５番５号",
+      "officialUrl": "https://snopes.co.jp",
+      "industry": "貿易業（日用品、化粧品、食料品、資源の輸出入および卸売）",
+      "email": "info@snopes.co.jp",
+      "tel": "072-267-7890",
+      "fax": "不明",
+      "capital": "50,000,000円",
+      "founded": "2003年06月05日",
+      "businessSummary": "株式会社ＳＮＯＰＥＳは、アジア・南米諸国を中心に、日用品雑貨、化粧品、食料品、資源などの輸出入を行う貿易事業を展開しています。日本製品を世界へ発信し、世界の製品を日本に取り入れることで、「地域と地域・人と人・想いと想いをつなぐ架け橋」となることを目指しています。 [4, 7]",
+      "strengths": "アジア諸国および南米諸国に有する圧倒的なネットワークが強みです。海外への販路拡大を考えている日本企業や、日本への販路を求める海外企業に対し、貿易のプロフェッショナルとしてサポートを提供しています。 [7, 8]"
+    },
+    "time_tokens": {
+      "time": 25.27,
+      "input_tokens": 572,
+      "thinking_tokens": 775,
+      "answer_tokens": 351,
+      "total_tokens": 1698
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001139372 法人名: ＭＩＴＡＳＵ株式会社 住所: 大阪府大阪市西区江戸堀２丁目１番１号江戸堀センタービル９階",
+    "time_tokens": {
+      "time": 26.35,
+      "input_tokens": 586,
+      "thinking_tokens": 802,
+      "answer_tokens": 98,
+      "total_tokens": 1486
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "リゾート・コミュニケーション株式会社",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市此花区北港緑地２丁目２番９８号",
+      "officialUrl": "http://www.rcom.jp",
+      "industry": "リゾート関連サービス、イベント企画・運営、広告代理業",
+      "email": "不明",
+      "tel": "06-6463-7282",
+      "fax": "06-6463-7283",
+      "capital": "1,505万円",
+      "founded": "2011年9月",
+      "businessSummary": "リゾート施設の運営コンサルティング、アミューズメント施設の運営管理、集客イベントの企画・運営、広報活動サポート、営業代行サービスを提供しています。また、広告クリエイティブやインターネット販売も展開する総合広告代理店です。 [2, 4]",
+      "strengths": "リゾート施設の運営に関するコンサルティングやアミューズメント施設の運営管理、集客イベントの企画、運営、広報活動のサポートなど、リゾート関連の多岐にわたるサービスを総合的に提供している点です。 [4]"
+    },
+    "time_tokens": {
+      "time": 25.17,
+      "input_tokens": 576,
+      "thinking_tokens": 715,
+      "answer_tokens": 310,
+      "total_tokens": 1601
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001146906 法人名: ＡＯＩ　ＣＲＥＡＴＩＶＥ　ＭＡＮＡＧＥＭＥＮＴ株式会社 住所: 大阪府大阪市此花区西九条１丁目３番３７号",
+    "time_tokens": {
+      "time": 26.35,
+      "input_tokens": 620,
+      "thinking_tokens": 700,
+      "answer_tokens": 131,
+      "total_tokens": 1451
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001143894 法人名: インテグラル株式会社 住所: 大阪府大阪市中央区高津１丁目３－８－１１０７",
+    "time_tokens": {
+      "time": 27.8,
+      "input_tokens": 576,
+      "thinking_tokens": 1118,
+      "answer_tokens": 109,
+      "total_tokens": 1803
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001141816 法人名: エーピーアイコンサルタンツ株式会社 住所: 大阪府大阪市淀川区宮原１丁目１３番５号",
+    "time_tokens": {
+      "time": 31.31,
+      "input_tokens": 578,
+      "thinking_tokens": 1176,
+      "answer_tokens": 110,
+      "total_tokens": 1864
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001149363 法人名: 株式会社コミス 住所: 大阪府大阪市平野区加美北１丁目１６－１４－２階",
+    "time_tokens": {
+      "time": 29.76,
+      "input_tokens": 576,
+      "thinking_tokens": 1085,
+      "answer_tokens": 109,
+      "total_tokens": 1770
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "株式会社アイテック",
+      "companyStatus": "閉鎖",
+      "address": "大阪府吹田市南吹田５丁目２６番２８号",
+      "officialUrl": "https://i-tech-co.jp/",
+      "industry": "印刷業",
+      "email": "不明",
+      "tel": "06-6105-9545",
+      "fax": "06-6105-9546",
+      "capital": "300万円",
+      "founded": "2012年10月11日",
+      "businessSummary": "大型ポスター出力（パネル加工、ラミネート加工、その他）、オンデマンド出力（冊子、ハガキ、DM、名刺）、オフセット印刷（パンフレット、カタログ、リーフレット、ポスター等）、企画・デザイン・編集、P.O.P、DVD制作、各種ダイレクトメール",
+      "strengths": "不明"
+    },
+    "time_tokens": {
+      "time": 28.32,
+      "input_tokens": 568,
+      "thinking_tokens": 886,
+      "answer_tokens": 258,
+      "total_tokens": 1712
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "ＳＩＫＩ株式会社",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市浪速区稲荷１丁目７番２号３Ｆ",
+      "officialUrl": "https://siki-inc.com/",
+      "industry": "消費者向けサービス・販売、日用品D2Cサブスクリプション、健康食品・化粧品企画販売、中小企業M&A・資金調達・ブランド支援",
+      "email": "support@galleido.jp",
+      "tel": "050-3310-9603",
+      "fax": "不明",
+      "capital": "42,200,000円",
+      "founded": "2012年8月",
+      "businessSummary": "大阪府を拠点に、美容商品、健康食品、ヘルスフードなどの研究・卸・販売を行う他、日用品D2Cサブスクリプションサービス「GALLEIDO」シリーズ（電動歯ブラシ、シャワーヘッド、カミソリ、完全栄養食など）を展開しています。また、中小企業向けにM&A、資金調達、新規事業開発、ブランド支援（海外OEM、EC運用、マーケティング支援）などの成長支援事業も手掛けています。",
+      "strengths": "「感動体験を通じて、人々を笑顔に」をミッションに掲げ、日用品D2Cサブスクリプション分野に積極的に注力しており、電動歯ブラシサブスク「GALLEIDO DENTAL MEMBER」は会員数2.5万人突破、顧客継続率98%超の実績を持っています。M&Aや資金調達支援においても多数の実績があり、「売る力」と「伸ばす力」を強みとして、企画から運用まで一貫した支援を提供しています。"
+    },
+    "time_tokens": {
+      "time": 36.43,
+      "input_tokens": 576,
+      "thinking_tokens": 1391,
+      "answer_tokens": 430,
+      "total_tokens": 2397
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001150759 法人名: 株式会社ＳＫホールディングス 住所: 大阪府和泉市和気町２丁目３番１号",
+    "time_tokens": {
+      "time": 27.55,
+      "input_tokens": 570,
+      "thinking_tokens": 899,
+      "answer_tokens": 106,
+      "total_tokens": 1575
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001151154 法人名: 株式会社ドレスアンドコー 住所: 大阪府大阪市浪速区湊町１丁目２番３号マルイト難波ビル１１階",
+    "time_tokens": {
+      "time": 26.95,
+      "input_tokens": 584,
+      "thinking_tokens": 738,
+      "answer_tokens": 113,
+      "total_tokens": 1435
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001154751 法人名: キャスタック株式会社 住所: 大阪府大阪市天王寺区生玉前町１番２６号情報センタービル３０１",
+    "time_tokens": {
+      "time": 23.21,
+      "input_tokens": 584,
+      "thinking_tokens": 502,
+      "answer_tokens": 113,
+      "total_tokens": 1199
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "ハックベンチャーズ株式会社",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市北区角田町８番４７号阪急グランドビル２６階",
+      "officialUrl": "https://www.hack-ventures.com/",
+      "industry": "ベンチャーキャピタル",
+      "email": "不明",
+      "tel": "06-6105-1395",
+      "fax": "06-6105-1395",
+      "capital": "不明",
+      "founded": "2013年5月23日",
+      "businessSummary": "IoT（Internet of Things）/IoE（Internet of Everything）分野に特化したベンチャーキャピタル事業を展開しています。投資業務、再生支援業務、株式公開へのアドバイス、経営情報提供サービスなどを行っており、大阪/関西に蓄積された技術・モノづくり・事業ノウハウと、シリコンバレーなどの先進的なイノベーションおよび新しいビジネスモデルを組み合わせて、新たな事業創造を目指しています。 [4, 5, 6, 9, 14]",
+      "strengths": "米国シリコンバレーを含む国内外の幅広いネットワークと知見を活用したハンズオン支援が強みです。 [3, 9, 14] 大阪市や中小企業基盤整備機構などの公的機関を含む、強固な出資基盤を有しています。 [9, 11, 13] 経験豊富なキャピタリスト陣が、投資先企業に対して事業開発、資金調達、海外展開などの経営支援を行っています。 [11, 14]"
+    },
+    "time_tokens": {
+      "time": 25.81,
+      "input_tokens": 584,
+      "thinking_tokens": 552,
+      "answer_tokens": 405,
+      "total_tokens": 1541
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001162003 法人名: サマーバケーション株式会社 住所: 大阪府大阪市北区大深町４番２０号グランフロント大阪タワーＡ",
+    "time_tokens": {
+      "time": 24.08,
+      "input_tokens": 580,
+      "thinking_tokens": 599,
+      "answer_tokens": 111,
+      "total_tokens": 1290
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "株式会社シリコンバレーテック",
+      "companyStatus": "活動中",
+      "address": "大阪府東大阪市小阪３丁目５番８－１００１号",
+      "officialUrl": "https://siliconvalleytech.jp/",
+      "industry": "スタートアップ投資・事業支援",
+      "email": "不明",
+      "tel": "不明",
+      "fax": "不明",
+      "capital": "不明",
+      "founded": "不明",
+      "businessSummary": "米国シリコンバレーでの経験やヒトネットワークを活かし、スタートアップ支援やM&A、知財の産業化等を支援しています。 [2]",
+      "strengths": "米国シリコンバレーでの経験やヒトネットワーク [2]"
+    },
+    "time_tokens": {
+      "time": 26.27,
+      "input_tokens": 578,
+      "thinking_tokens": 598,
+      "answer_tokens": 205,
+      "total_tokens": 1381
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001162317 法人名: 株式会社Ｈａｎａプラス 住所: 大阪府大阪市中央区南久宝寺町２丁目６番５号",
+    "time_tokens": {
+      "time": 23.7,
+      "input_tokens": 576,
+      "thinking_tokens": 563,
+      "answer_tokens": 104,
+      "total_tokens": 1243
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "ゴイク電池株式会社",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市淀川区西中島５丁目１３番１２号",
+      "officialUrl": "https://goiku.com/",
+      "industry": "電池診断装置の開発・販売、バッテリー・マネージメント・システム（BMS）の開発・販売、急速充電装置の開発・販売",
+      "email": "takemura.osamu@goiku.com",
+      "tel": "06-4805-8728",
+      "fax": "06-4805-8722",
+      "capital": "81,100,000円",
+      "founded": "2014年10月16日",
+      "businessSummary": "電池診断装置の開発・販売、バッテリー・マネージメント・システム（BMS）の開発・販売、急速充電装置の開発・販売を行っています。特に、EV車バッテリーの診断装置開発に注力しており、世界で初めてEV車両に搭載された電池の容量と劣化度をわずか30秒で診断できるアルゴリズムを確立しました。この技術を通じて、脱炭素社会と循環型社会の実現に貢献することを目指しています。 [1, 2, 5, 7, 11, 12, 15]",
+      "strengths": "世界初のEV車両搭載電池の容量と劣化度をわずか30秒で診断できる独自のアルゴリズムを確立している点が最大の強みです。また、特許技術を活用した電池診断装置、蓄電システム、バッテリー・マネージメント・システム（BMS）、急速充電技術を提供しています。2021年にはリコーの創始者が設立した市村清新技術財団の新技術開発助成金対象事業にも選定されています。 [1, 2, 5, 7, 11, 12, 15]"
+    },
+    "time_tokens": {
+      "time": 23.29,
+      "input_tokens": 574,
+      "thinking_tokens": 749,
+      "answer_tokens": 467,
+      "total_tokens": 1790
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "株式会社ＪＵＮＹＡ　ＷＡＲＡＳＨＩＮＡ",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市西区西本町１丁目１３番９号",
+      "officialUrl": "https://junyawarashina.com/",
+      "industry": "皮革製品の企画、製造、販売",
+      "email": "mail@junyawarashina.com",
+      "tel": "不明",
+      "fax": "不明",
+      "capital": "不明",
+      "founded": "2014年",
+      "businessSummary": "高級皮革製品（バッグ、財布など）の企画、製造、販売。特に海外王室などからの依頼でオートクチュールバッグの製作を手がけています。 [1, 2, 4, 5]",
+      "strengths": "世界中から厳選された希少な素材と熟練した職人による高い技術力を活かした、比類なき高級皮革製品の企画、製造を行っています。海外王室からのオートクチュールバッグの製作実績があり、独自のブランド哲学とデザインが特徴です。 [1, 2, 4, 5]"
+    },
+    "time_tokens": {
+      "time": 29.6,
+      "input_tokens": 596,
+      "thinking_tokens": 997,
+      "answer_tokens": 302,
+      "total_tokens": 1895
+    }
+  },
+  {
+    "status": "success",
+    "data": {
+      "companyName": "株式会社エコテック",
+      "companyStatus": "活動中",
+      "address": "大阪府大阪市中央区南船場２丁目６番１０号ツチノビル８階",
+      "officialUrl": "http://www.ecotec-reform.com/",
+      "industry": "居住用リフォーム業、外壁塗装業",
+      "email": "不明",
+      "tel": "0120-868-582",
+      "fax": "不明",
+      "capital": "10,000,000円",
+      "founded": "2013年",
+      "businessSummary": "大阪市を拠点に、住宅のキッチン、風呂、トイレなどの水回りリフォーム、内装・外装リフォーム、エコキュートや蓄電池などの電化製品の設置、外壁塗装を行う。また、店舗の内装・デザイン・改装工事も手掛けている。 [4, 14]",
+      "strengths": "職人直営による低コストでの施工提供を特徴としている。 [14]"
+    },
+    "time_tokens": {
+      "time": 39.98,
+      "input_tokens": 580,
+      "thinking_tokens": 1418,
+      "answer_tokens": 276,
+      "total_tokens": 2274
+    }
+  },
+  {
+    "status": "terminated",
+    "error": "Required information could not be found.",
+    "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+    "targetCompany": "法人番号: 1010001163835 法人名: 株式会社ＢＦＩ 住所: 大阪府東大阪市御厨西ノ町２丁目１－３",
+    "time_tokens": {
+      "time": 25.51,
+      "input_tokens": 568,
+      "thinking_tokens": 758,
+      "answer_tokens": 105,
+      "total_tokens": 1431
+    }
+  }
+]
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: README.md
+- 内容:
+# AI-Powered Prompt Optimization Framework
+
+## 概要
+
+このプロジェクトは、AI（Google Gemini）を利用した情報検索タスクの性能を、**"審判役のAI"（LLM as a Judge）に評価・改善させる**ための、全自動A/Bテストフレームワークです。
+
+良いプロンプト開発にありがちな「属人化」「時間コスト」「評価基準の曖昧さ」といった課題を、**「実行→評価→改善→再実行→比較」**というサイクルを自動化することで解決します。
+
+### イメージ
+パワポ
+https://1drv.ms/p/c/135b66d476409d97/EZsra7MFu3FAolo4vOuwvMkB7rZSty9P--oLLV-mjV10wg?e=uKYQAu
+
+### 主要な構成要素
+
+1.  **評価・改善司令塔 (`advanced_evaluation_runner_log.py`)**
+    *   プロジェクトのメインスクリプト。
+    *   全体のプロセスを管理し、AI検索エージェントの性能を評価・改善します。
+
+2.  **AI検索エージェント (`gemini_search_app_new_sdk.py`)**
+    *   司令塔からの指示（プロンプト）に従って、実際に企業情報検索を実行するサブスクリプト。
+    *   Google検索ツールと連携し、リアルタイムの情報を取得します。
+
+3.  **APIキーマネージャー (`api_key_manager.py`)**
+    *   複数のGoogle APIキーを安全にローテーションさせ、レートリミットを回避するためのシングルトンクラス。
+
+```mermaid
+graph LR
+    subgraph "評価・改善司令塔"
+        direction TD
+        A1["<b>役割</b><br>“審判役AI”による<br>全自動A/Bテストツール"]
+        A2["<b>評価フロー</b><br>1. 初回実行<br>2. 評価 & 改善案生成<br>3. 改善版で再実行<br>4. 再評価<br>5. 最終比較レポート"]
+        A1 --> A2
+    end
+
+    subgraph "AI検索エージェント"
+        direction TD
+        B1["<b>役割</b><br>Google検索と連携する<br>情報検索の実行部隊"]
+        B2["<b>特徴</b><br>・思考プロセスの可視化<br>・動的プロンプト対応<br>・ストリーム出力"]
+        B1 --> B2
+    end
+    
+    A2 -- "実行指示 (プロンプト)" --> B1
+    B2 -- "実行結果 (ログ)" --> A2
+
+    style A1 fill:#E8F5E9,stroke:#333
+    style A2 fill:#F1F8E9,stroke:#333
+    style B1 fill:#E3F2FD,stroke:#333
+    style B2 fill:#EBF5FB,stroke:#333
+```
+
+## 特徴
+
+*   **LLM as a Judge**: 人間の代わりにAIがAIの出力を評価することで、客観的で一貫性のある評価を実現。
+*   **プロンプトの自己改善**: AIが自身の実行結果を分析し、より良い指示（プロンプト）を自動生成。
+*   **定量的・定性的評価**: 「スコア」や「実行時間」といった数値と、「分析コメント」や「改善提案」という言葉の両面から多角的に評価。
+*   **思考プロセスの可視化**: AIが何を考え、何を検索したかをリアルタイムで表示し、判断の透明性を確保。
+*   **安全なAPIキー管理**: 複数のAPIキーを自動でローテーションし、APIのレートリミットを回避。
+*   **徹底したログ管理**: 全ての実行プロセスとAIの出力を、企業名とタイムスタンプ付きのログファイルに保存。
+
+## セットアップ
+
+### 1. リポジトリのクローン
+
+```bash
+git clone https://github.com/your-username/your-repository.name.git
+cd your-repository.name
+```
+
+### 2. 必要なライブラリのインストール
+
+`requirements.txt`を使用して、必要なPythonライブラリをインストールします。
+
+```bash
+pip install -r requirements.txt
+```
+
+### 3. 環境変数の設定
+
+プロジェクトのルートディレクトリに`.env`ファイルを作成し、お持ちのGoogle APIキーを設定します。キーは複数設定することができ、プログラムが自動でローテーションして使用します。
+Google APIキーの取得は、こちらにアクセスしてください。（無料で取得できます。）
+https://aistudio.google.com/apikey
+
+**`.env` ファイルの例:**
+
+```env
+# 基本となるキー
+GOOGLE_API_KEY="AIzaSy...your...first...key"
+
+# 2つ目以降のキー (連番で設定)
+GOOGLE_API_KEY_1="AIzaSy...your...second...key"
+GOOGLE_API_KEY_2="AIzaSy...your...third...key"
+# ... 必要なだけ追加
+```
+
+`api_key_manager.py`がこれらのキーを全て読み込み、管理します。
+
+## 使い方
+
+### 基本的な使い方（1社ずつのテスト）
+
+メインスクリプトである`advanced_evaluation_runner_log.py`を実行します。引数として、調査したい企業名を渡してください。
+
+```bash
+python advanced_evaluation_runner_log.py "調査したい企業名　住所"
+```
+
+**実行例:**
+```bash
+python advanced_evaluation_runner_log.py "グーグル合同会社　住所"
+```
+
+### ファイルにテスト用データがあります。
+
+プロジェクトには、テスト用の企業データが100件記述された`input_data_sample.txt`が用意されています。このファイルを使って、テストを実行できます。
+
+**`input_data_sample.txt` の形式:**
+企業情報は`###`または改行で区切られています。
+```text
+### 1. 	ダイレックス・ジャパン株式会社  大阪府大阪市西区新町１丁目２４番８号ノース四ツ橋ビル８Ｆ
+### 2. 	原町製袋株式会社  大阪府大阪市中央区久太郎町４丁目１番３号
+### 3. 	新日本サーマルセラミックス株式会社  大阪府堺市堺区戎島町４丁４５番地１ポルタスセンタービル１２階
+...
+```
+
+
+## 実行プロセス
+
+スクリプトを実行すると、以下のステップが自動で進行します。
+
+1.  **初回実行**: デフォルトのプロンプトで`gemini_search_app_new_sdk.py`が実行されます。
+2.  **初回評価**: 実行ログが分析され、評価レポートと「改善版プロンプト」が生成されます。
+3.  **再実行**: 生成された「改善版プロンプト」を使って、再度`gemini_search_app_new_sdk.py`が実行されます。
+4.  **2回目評価**: 再実行のログが分析され、評価レポートが作成されます。
+5.  **最終比較**: 2つの評価レポートが比較され、総合的な分析結果がコンソールに出力されます。
+
+## ログの確認
+
+実行ログは、プロジェクトルートに作成される`log/`ディレクトリ内に保存されます。
+
+*   ファイル名: `[企業名]_[実行開始日時].log`
+*   内容: コンソールに出力された内容（AIの思考プロセス、最終回答、評価レポートなど）が全て記録されています。
+
+## ライセンス
+
+このプロジェクトは[MITライセンス](LICENSE.md)の下で公開されています。
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: requirements.txt
+- 内容:
+# Google Gemini APIの新しいSDK
+google-genai
+
+# .envファイルから環境変数を読み込むために使用
+python-dotenv

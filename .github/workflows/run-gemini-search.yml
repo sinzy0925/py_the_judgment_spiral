@@ -1,0 +1,48 @@
+# .github/workflows/run-gemini-search.yml
+
+name: Run Gemini Parallel Search
+
+# ワークフローを手動で実行できるようにする
+on:
+  workflow_dispatch:
+
+jobs:
+  run-script:
+    # 実行環境として最新のUbuntuを使用する（無料枠の対象）
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. リポジトリのコードをチェックアウトする
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      # 2. Python 3.11 環境をセットアップする
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 3. 必要なPythonライブラリをインストールする
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 4. スクリプトを実行する
+      #    GitHub SecretsからAPIキーを環境変数として渡す
+      - name: Run Gemini Search Script
+        run: python gemini_search_parallel.py --prompt-file input_data_sumple.txt --parallel 1
+        env:
+          # GitHub Secretsに登録したキーを環境変数に設定
+          # 複数のキーがある場合は、以下のように追加してください
+          GOOGLE_API_KEY_1: ${{ secrets.GOOGLE_API_KEY_1 }}
+          GOOGLE_API_KEY_2: ${{ secrets.GOOGLE_API_KEY_2 }}
+          GOOGLE_API_KEY_3: ${{ secrets.GOOGLE_API_KEY_3 }}
+          GOOGLE_API_KEY_4: ${{ secrets.GOOGLE_API_KEY_4 }}
+
+      # 5. 実行結果（output.jsonとログ）を成果物としてアップロードする
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: search-results
+          path: |
+            output.json
+            log/
