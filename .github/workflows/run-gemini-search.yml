@@ -29,7 +29,7 @@ jobs:
       # 4. スクリプトを実行する
       #    GitHub SecretsからAPIキーを環境変数として渡す
       - name: Run Gemini Search Script
-        run: python gemini_search_parallel.py --prompt-file input_data_sumple.txt --parallel 2
+        run: python gemini_search_parallel.py --prompt-file input_data_sumple.txt --parallel 10
         env:
           # GitHub Secretsに登録したキーを環境変数に設定
           # 複数のキーがある場合は、以下のように追加してください
@@ -37,6 +37,22 @@ jobs:
           GOOGLE_API_KEY_2: ${{ secrets.GOOGLE_API_KEY_2 }}
           GOOGLE_API_KEY_3: ${{ secrets.GOOGLE_API_KEY_3 }}
           GOOGLE_API_KEY_4: ${{ secrets.GOOGLE_API_KEY_4 }}
+          GOOGLE_API_KEY_5: ${{ secrets.GOOGLE_API_KEY_5 }}
+          GOOGLE_API_KEY_6: ${{ secrets.GOOGLE_API_KEY_6 }}
+          GOOGLE_API_KEY_7: ${{ secrets.GOOGLE_API_KEY_7 }}
+          GOOGLE_API_KEY_8: ${{ secrets.GOOGLE_API_KEY_8 }}
+          GOOGLE_API_KEY_9: ${{ secrets.GOOGLE_API_KEY_9 }}
+          GOOGLE_API_KEY_10: ${{ secrets.GOOGLE_API_KEY_10 }}
+          GOOGLE_API_KEY_11: ${{ secrets.GOOGLE_API_KEY_11 }}
+          GOOGLE_API_KEY_12: ${{ secrets.GOOGLE_API_KEY_12 }}
+          GOOGLE_API_KEY_13: ${{ secrets.GOOGLE_API_KEY_13 }}
+          GOOGLE_API_KEY_14: ${{ secrets.GOOGLE_API_KEY_14 }}
+          GOOGLE_API_KEY_15: ${{ secrets.GOOGLE_API_KEY_15 }}
+          GOOGLE_API_KEY_16: ${{ secrets.GOOGLE_API_KEY_16 }}
+          GOOGLE_API_KEY_17: ${{ secrets.GOOGLE_API_KEY_17 }}
+          GOOGLE_API_KEY_18: ${{ secrets.GOOGLE_API_KEY_18 }}
+          GOOGLE_API_KEY_19: ${{ secrets.GOOGLE_API_KEY_19 }}
+          GOOGLE_API_KEY_20: ${{ secrets.GOOGLE_API_KEY_20 }}
 
       # 5. 実行結果（output.jsonとログ）を成果物としてアップロードする
       - name: Upload results
