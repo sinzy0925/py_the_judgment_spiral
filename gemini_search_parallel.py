@@ -90,7 +90,7 @@ async def process_query_and_write_to_file(query: str, semaphore: asyncio.Semapho
     """
     async with semaphore:
         start_time = time.time()
-        query_for_log = query[25:50] + '...' if len(query) > 40 else query
+        query_for_log = query[6:26] + '...' if len(query) > 40 else query
 
         prompt_template="""
 # 調査対象企業
@@ -243,6 +243,19 @@ async def process_query_and_write_to_file(query: str, semaphore: asyncio.Semapho
         # 標準出力用に結果を返す
         return final_output
 
+def split_results():
+    # 全ての処理が完了した後、split_results.py を呼び出す
+    print("\n--- 全処理完了。結果の分割を開始します... ---", file=sys.stderr)
+    try:
+        # subprocessを使って `python split_results.py` コマンドを実行
+        import subprocess
+        subprocess.run([sys.executable, "analyze_results.py"], check=True)
+    except FileNotFoundError:
+        print("エラー: 'analyze_results.py' が見つかりません。分割処理をスキップしました。", file=sys.stderr)
+    except subprocess.CalledProcessError as e:
+        print(f"エラー: 'analyze_results.py' の実行中にエラーが発生しました: {e}", file=sys.stderr)
+
+
 async def main():
     parser = argparse.ArgumentParser(description="企業情報を検索し、結果をJSONで出力するアプリ")
     parser.add_argument("query", nargs='?', default=None, help="検索対象の企業名と住所（単一実行モード時）")
@@ -277,6 +290,7 @@ async def main():
         
         # 最後に、標準出力にだけ全結果をまとめて表示する
         print(json.dumps(successful_results, indent=2, ensure_ascii=False))
+        split_results()
         
     else: # (単一実行モードも同様に修正)
         if not args.query:
@@ -288,6 +302,8 @@ async def main():
         if result:
             # 標準出力に結果を表示
             print(json.dumps(result, indent=2, ensure_ascii=False))
+            split_results()
+
 
 if __name__ == "__main__":
     exit_code = 0

@@ -3,3 +3,4 @@ log/
 .env
 codeB.py
 code_output.txt
+output.json

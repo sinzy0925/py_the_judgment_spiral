@@ -61,4 +61,6 @@ jobs:
           name: search-results
           path: |
             output.json
+            success.json
+            terminated.json
             log/
