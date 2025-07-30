@@ -1,4 +1,4 @@
-# gemini_search_parallel.py (1件ごとのリアルタイム追記版)
+# gemini_search_parallel.py (全機能統合・バグ修正・最終版)
 
 import os
 import sys
@@ -10,25 +10,94 @@ from google.genai import types
 from dotenv import load_dotenv
 import json
 import re
-
-# --- ▼▼▼ リトライ機能のために、特定のエラーを捕捉するライブラリをインポート ▼▼▼ ---
 from google.api_core import exceptions
-
 from api_key_manager import api_key_manager
 
 load_dotenv()
 
 if 'GOOGLE_API_KEY' in os.environ:
     del os.environ['GOOGLE_API_KEY']
-    
-# --- ▼▼▼ 複数タスクからのファイル書き込みを保護するためのロックを作成 ▼▼▼ ---
+
+# --- 1件ごとの追記処理のための、ファイル書き込みロック ---
 file_write_lock = asyncio.Lock()
 
+import json
+import sys
 
-# (この関数は変更なし)
-def _blocking_call_to_gemini(api_key: str, full_contents: str, query_for_log: str):
+def split_json_by_status(input_file='output.json'):
+    """
+    指定されたJSONファイルを読み込み、'status'キーの値に応じて、
+    'success.json' と 'terminated.json' に分割して出力する。
+    
+    Args:
+        input_file (str): 読み込むJSONファイルのパス。
+    """
+    try:
+        # --- 1. 入力ファイルを読み込む ---
+        print(f"'{input_file}' を読み込んでいます...")
+        with open(input_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        if not isinstance(data, list):
+            print(f"エラー: ファイル '{input_file}' の内容はJSON配列（リスト）ではありません。", file=sys.stderr)
+            sys.exit(1)
+            
+        # --- 2. データを振り分けるための空のリストを用意 ---
+        success_items = []
+        terminated_items = []
+        other_items_count = 0
+
+        # --- 3. 全データをループして、statusに応じてリストに追加 ---
+        for item in data:
+            # itemが辞書型で、かつ'status'キーを持っているか確認
+            if isinstance(item, dict) and 'status' in item:
+                if item['status'] == 'success':
+                    success_items.append(item)
+                elif item['status'] == 'terminated':
+                    terminated_items.append(item)
+                else:
+                    other_items_count += 1
+            else:
+                other_items_count += 1
+        
+        # --- 4. 'success.json' に書き込む ---
+        success_filename = 'success.json'
+        print(f"'{success_filename}' に {len(success_items)} 件のデータを書き込んでいます...")
+        with open(success_filename, 'w', encoding='utf-8') as f:
+            # indent=2 で見やすい形式に整形し、ensure_ascii=Falseで日本語の文字化けを防ぐ
+            json.dump(success_items, f, indent=2, ensure_ascii=False)
+            
+        # --- 5. 'terminated.json' に書き込む ---
+        terminated_filename = 'terminated.json'
+        print(f"'{terminated_filename}' に {len(terminated_items)} 件のデータを書き込んでいます...")
+        with open(terminated_filename, 'w', encoding='utf-8') as f:
+            json.dump(terminated_items, f, indent=2, ensure_ascii=False)
+            
+        # --- 6. 処理結果のサマリーを表示 ---
+        print("\n--- 処理完了 ---")
+        print(f"読み込み総件数: {len(data)}件")
+        print(f" -> '{success_filename}': {len(success_items)}件")
+        print(f" -> '{terminated_filename}': {len(terminated_items)}件")
+        if other_items_count > 0:
+            print(f" -> 対象外（statusが'success'でも'terminated'でもないもの）: {other_items_count}件")
+        print("------------------")
+
+    except FileNotFoundError:
+        print(f"エラー: ファイル '{input_file}' が見つかりません。", file=sys.stderr)
+        sys.exit(1)
+    except json.JSONDecodeError:
+        print(f"エラー: ファイル '{input_file}' は有効なJSON形式ではありません。", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"予期せぬエラーが発生しました: {e}", file=sys.stderr)
+        sys.exit(1)
+
+def _blocking_call_to_gemini(api_key: str, full_contents: str, query_for_log_base: str, parallel_count: int):
+    # バグ修正済みのリトライ機能付き関数
+    query_for_log = query_for_log_base[6:26] + '...' if len(query_for_log_base) > 50 else query_for_log_base
     MAX_RETRIES = 3
-    INITIAL_DELAY = 2
+    INITIAL_DELAY = 5
+
     for attempt in range(MAX_RETRIES):
         try:
             if not api_key:
@@ -41,39 +110,66 @@ def _blocking_call_to_gemini(api_key: str, full_contents: str, query_for_log: st
             )
             if attempt == 0:
                 print(f"({query_for_log}) AIが思考を開始します...", file=sys.stderr)
-            api_call_start_time = time.time() 
+            api_call_start_time = time.time()
             stream = client.models.generate_content_stream(model='gemini-2.5-flash', contents=full_contents, config=config)
+            
             thinking_text, answer_text = "", ""
+            
+            # --- ▼▼▼ ここからが修正箇所です ▼▼▼ ---
+            
+            is_first_thought = True # 思考ログの初回かどうかを判定するフラグ
+            
             for chunk in stream:
                 if not chunk.candidates: continue
-                # --- SDKのバージョン差異に対応 ---
+
+                # SDKのバージョンやレスポンス形式の差異に対応
                 if hasattr(chunk.candidates[0].content, 'parts'):
                     parts = chunk.candidates[0].content.parts
                 else:
-                    parts = [] # Fallback for older versions or different structures
+                    parts = []
+                
                 for part in parts:
                     if not hasattr(part, 'text') or not part.text: continue
-                    if hasattr(part, 'thought') and part.thought:
+                    
+                    # 'thought' 属性の有無で思考ログかどうかを判定
+                    is_thought = hasattr(part, 'thought') and part.thought
+                    
+                    if is_thought and parallel_count <= 1:
+                        if is_first_thought :
+                            # 最初の思考ログの前に、見出しと改行を表示する
+                            print(f"\n--- AIの思考プロセス ({query_for_log}) ---", file=sys.stderr)
+                            is_first_thought = False
+                        # 思考ログを画面にリアルタイムで出力
+                        print(part.text, end="", flush=True, file=sys.stderr)
                         thinking_text += part.text
                     else:
                         answer_text += part.text
+
+            if not is_first_thought:
+                if parallel_count <= 1:
+                    # 思考ログが表示された場合、見やすくするために最後に改行を入れる
+                    print("", file=sys.stderr)
+
+            # --- ▲▲▲ ここまでが修正箇所です ▲▲▲ ---
+
             elapsed = time.time() - api_call_start_time
             print(f"({query_for_log}) 全ストリーム受信完了 ({elapsed:.2f}s)。", file=sys.stderr)
             return thinking_text, answer_text
+            
         except exceptions.ResourceExhausted as e:
             if attempt < MAX_RETRIES - 1:
-                delay = INITIAL_DELAY ** (attempt + 1)
-                print(f"警告 ({query_for_log}): APIレートリミットです。{delay}秒待機して再試行します... (試行 {attempt + 2}/{MAX_RETRIES})", file=sys.stderr)
+                delay = INITIAL_DELAY * (attempt + 1)
+                print(f"\n警告 ({query_for_log}): APIレートリミットです。{delay}秒待機して再試行します... (試行 {attempt + 2}/{MAX_RETRIES})", file=sys.stderr)
                 time.sleep(delay)
             else:
-                print(f"エラー ({query_for_log}): 最大リトライ回数({MAX_RETRIES}回)を超えました。メインAPIコール失敗。", file=sys.stderr)
+                print(f"\nエラー ({query_for_log}): 最大リトライ回数({MAX_RETRIES}回)を超えました。メインAPIコール失敗。", file=sys.stderr)
                 return None, None
         except Exception as e:
             print(f"\nストリームの処理中に予期せぬエラーが発生しました ({query_for_log}): {e}", file=sys.stderr)
             return None, None
+            
     return None, None
 
-# (この関数は変更なし)
 def _blocking_count_tokens(api_key: str, model: str, contents: str) -> types.CountTokensResponse | None:
     if not api_key: return None
     try:
@@ -83,15 +179,11 @@ def _blocking_count_tokens(api_key: str, model: str, contents: str) -> types.Cou
         print(f"\nトークン計算中にエラーが発生しました ({contents[:30]}...): {e}", file=sys.stderr)
         return None
 
-# --- ▼▼▼ この関数が、ファイルへの書き込みまで担当するように修正 ▼▼▼ ---
-async def process_query_and_write_to_file(query: str, semaphore: asyncio.Semaphore, output_filename: str):
-    """
-    単一クエリを処理し、完了後、即座に結果をJSONファイルに追記する。
-    """
+# --- ▼▼▼ --parallelの値を判定し、1件ずつ追記する、完全版のタスク関数 ▼▼▼ ---
+async def process_query_task(query: str, semaphore: asyncio.Semaphore, output_filename: str, parallel_count: int):
     async with semaphore:
         start_time = time.time()
-        query_for_log = query[6:26] + '...' if len(query) > 40 else query
-
+        
         prompt_template="""
 # 調査対象企業
 - {company_name}
@@ -132,13 +224,15 @@ async def process_query_and_write_to_file(query: str, semaphore: asyncio.Semapho
   }}
 }}```
 """
-
         full_contents = prompt_template.format(company_name=query)
 
         input_tokens, thinking_tokens, answer_tokens = 0, 0, 0
 
+        #print(parallel_count)
+        #print('parallel_count')
+
         input_key = await api_key_manager.get_next_key()
-        if input_key:
+        if input_key and parallel_count <= 1:
             input_token_response = await asyncio.to_thread(
                 _blocking_count_tokens, input_key, 'gemini-2.5-flash', full_contents
             )
@@ -146,18 +240,15 @@ async def process_query_and_write_to_file(query: str, semaphore: asyncio.Semapho
 
         main_call_key = await api_key_manager.get_next_key()
         if not main_call_key:
-            print(f"エラー ({query_for_log}): メイン処理用のAPIキーを取得できませんでした。", file=sys.stderr)
             return None
-            
         thinking_text, answer_text = await asyncio.to_thread(
-            _blocking_call_to_gemini, main_call_key, full_contents, query_for_log
+            _blocking_call_to_gemini, main_call_key, full_contents, query,parallel_count
         )
 
         if thinking_text is None and answer_text is None:
-            print(f"エラー ({query_for_log}): Geminiからの応答取得に失敗しました。", file=sys.stderr)
             return None
 
-        if thinking_text:
+        if thinking_text and parallel_count <= 1:
             thinking_key = await api_key_manager.get_next_key()
             if thinking_key:
                 thinking_token_response = await asyncio.to_thread(
@@ -165,7 +256,7 @@ async def process_query_and_write_to_file(query: str, semaphore: asyncio.Semapho
                 )
                 if thinking_token_response: thinking_tokens = thinking_token_response.total_tokens
 
-        if answer_text:
+        if answer_text and parallel_count <= 1:
             answer_key = await api_key_manager.get_next_key()
             if answer_key:
                 answer_token_response = await asyncio.to_thread(
@@ -184,77 +275,46 @@ async def process_query_and_write_to_file(query: str, semaphore: asyncio.Semapho
 
         final_output = {}
         try:
-            # --- ▼▼▼ ここが唯一の修正箇所です ▼▼▼ ---
-            
             json_str = None
-            # 1. ```json ... ``` というブロックを、説明文ごと全文の中から探す (re.DOTALLで改行も対象に)
             match = re.search(r"```json(.*)```", answer_text, re.DOTALL)
-            
             if match:
-                # 2. ブロックが見つかった場合、その中身だけを抽出する (group(1))
                 json_str = match.group(1).strip()
             else:
-                # 3. ブロックが見つからない場合（正常系）、応答全体がJSONだと仮定する
                 json_str = answer_text.strip()
-            
             if not json_str:
                 raise json.JSONDecodeError("抽出後のJSON文字列が空です", "", 0)
-
             final_output = json.loads(json_str)
-
         except json.JSONDecodeError as e:
-            print(json_str)
-            print(f"NG_json_str") # デバッグ用
+            query_for_log = query[6:26] + '...' if len(query) > 50 else query
             print(f"エラー ({query_for_log}): API応答のJSON解析に失敗しました: {e}", file=sys.stderr)
             final_output = {
-                "status": "error",
-                "error": "Failed to parse API response",
-                "message": f"APIからの応答をJSONとして解析できませんでした。 raw_response: {answer_text}",
-                "raw_response": answer_text
+                "status": "error", "error": "Failed to parse API response",
+                "message": f"APIからの応答をJSONとして解析できませんでした。", "raw_response": answer_text
             }
         
-        # --- ▲▲▲ ここまでが唯一の修正箇所です ▲▲▲ ---        
         final_output["time_tokens"] = time_tokens_info
-        # --- ▼▼▼ ここからがファイル追記処理 ▼▼▼ ---
-
-        async with file_write_lock: # ロックを取得して、ファイルアクセスを排他制御
+        
+        # --- 1件ごとのファイル追記処理 ---
+        query_for_log = query[6:26] + '...' if len(query) > 50 else query
+        async with file_write_lock:
             all_data = []
             try:
-                # 既存のファイルを読み込む
                 if os.path.exists(output_filename) and os.path.getsize(output_filename) > 0:
                     with open(output_filename, 'r', encoding='utf-8') as f:
                         all_data = json.load(f)
-                        if not isinstance(all_data, list):
-                            all_data = []
-            except (json.JSONDecodeError, FileNotFoundError):
-                pass
+                        if not isinstance(all_data, list): all_data = []
+            except (json.JSONDecodeError, FileNotFoundError): pass
             
-            # 今回の結果を追加
             all_data.append(final_output)
             
-            # ファイルに書き戻す
             try:
                 with open(output_filename, 'w', encoding='utf-8') as f:
                     json.dump(all_data, f, indent=2, ensure_ascii=False)
                 print(f"({query_for_log}) 結果を {output_filename} に追記しました。", file=sys.stderr)
             except IOError as e:
-                print(f"エラー ({query_for_log}): ファイル書き込みに失敗: {e}", file=sys.stderr)
-        
-        # 標準出力用に結果を返す
+                 print(f"エラー ({query_for_log}): ファイル書き込みに失敗: {e}", file=sys.stderr)
+
         return final_output
-
-def split_results():
-    # 全ての処理が完了した後、split_results.py を呼び出す
-    print("\n--- 全処理完了。結果の分割を開始します... ---", file=sys.stderr)
-    try:
-        # subprocessを使って `python split_results.py` コマンドを実行
-        import subprocess
-        subprocess.run([sys.executable, "analyze_results.py"], check=True)
-    except FileNotFoundError:
-        print("エラー: 'analyze_results.py' が見つかりません。分割処理をスキップしました。", file=sys.stderr)
-    except subprocess.CalledProcessError as e:
-        print(f"エラー: 'analyze_results.py' の実行中にエラーが発生しました: {e}", file=sys.stderr)
-
 
 async def main():
     parser = argparse.ArgumentParser(description="企業情報を検索し、結果をJSONで出力するアプリ")
@@ -262,10 +322,18 @@ async def main():
     parser.add_argument("--prompt-file", help="複数クエリが記述されたテキストファイルのパス（並列実行モード時）")
     parser.add_argument("--parallel", type=int, default=5, help="最大並列実行数（デフォルト: 5）")
     args = parser.parse_args()
-
+    
     output_filename = "output.json"
+    
+    #try:
+    #    if os.path.exists(output_filename):
+    #        os.remove(output_filename)
+    #        print(f"INFO: 既存の '{output_filename}' をクリアしました。", file=sys.stderr)
+    #except OSError as e:
+    #    print(f"警告: '{output_filename}' のクリアに失敗しました: {e}", file=sys.stderr)
+    
     is_parallel_mode = bool(args.prompt_file)
-
+    
     if is_parallel_mode:
         print(f"INFO: 並列実行モードで起動します (最大{args.parallel}並列)。", file=sys.stderr)
         try:
@@ -280,30 +348,24 @@ async def main():
             sys.exit(1)
         
         semaphore = asyncio.Semaphore(args.parallel)
-        # 新しいタスク関数を呼び出す
-        tasks = [process_query_and_write_to_file(q, semaphore, output_filename) for q in queries]
-        # 全てのタスクの完了を待つ
+        # --- `args.parallel` の値をタスク関数に渡す ---
+        tasks = [process_query_task(q, semaphore, output_filename, args.parallel) for q in queries]
         results = await asyncio.gather(*tasks)
         
         successful_results = [res for res in results if res is not None]
         print(f"\n--- 全タスク完了: {len(successful_results)} / {len(queries)} 件の処理に成功 ---", file=sys.stderr)
-        
-        # 最後に、標準出力にだけ全結果をまとめて表示する
         print(json.dumps(successful_results, indent=2, ensure_ascii=False))
-        split_results()
+        split_json_by_status(output_filename)
         
-    else: # (単一実行モードも同様に修正)
+    else: # 単一実行モード
         if not args.query:
             parser.error("単一実行モードでは 'query' 引数が必要です。")
         print("INFO: 単一実行モードで起動します。", file=sys.stderr)
         semaphore = asyncio.Semaphore(1)
-        # 新しいタスク関数を呼び出す
-        result = await process_query_and_write_to_file(args.query, semaphore, output_filename)
+        # --- 単一実行なので並列数は 1 を渡す ---
+        result = await process_query_task(args.query, semaphore, output_filename, 1)
         if result:
-            # 標準出力に結果を表示
-            print(json.dumps(result, indent=2, ensure_ascii=False))
-            split_results()
-
+            print(json.dumps([result], indent=2, ensure_ascii=False))
 
 if __name__ == "__main__":
     exit_code = 0
@@ -318,4 +380,3 @@ if __name__ == "__main__":
     finally:
         api_key_manager.save_session()
         print("[INFO] アプリケーション終了に伴いセッションを保存しました。", file=sys.stderr)
-        sys.exit(exit_code)
