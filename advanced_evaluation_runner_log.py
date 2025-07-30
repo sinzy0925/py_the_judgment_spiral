@@ -39,7 +39,7 @@ def setup_logger(company_name: str):
     # ファイル名に使えない文字を置換
     safe_company_name = re.sub(r'[\\|/|:|*|?|"|<|>|\|]', '_', company_name)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file_name = f"{safe_company_name[:50]}_{timestamp}.log"
+    log_file_name = f"{timestamp}_{safe_company_name[:50]}.log"
     log_file_path = os.path.join(log_dir, log_file_name)
 
     # 2. ロガーの取得とレベル設定
@@ -193,7 +193,7 @@ json```{{
 """
 
 async def run_search_app(company_name: str, prompt_file: str = None) -> str:
-    target_script = "gemini_search_app_new_sdk.py"
+    target_script = "gemini_search_para.py"
     command = [sys.executable, target_script, company_name]
     if prompt_file:
         command.extend(["--prompt-file", prompt_file])
