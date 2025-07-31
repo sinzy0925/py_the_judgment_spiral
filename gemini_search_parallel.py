@@ -347,6 +347,8 @@ async def process_query_task(query: str, semaphore: asyncio.Semaphore, output_fi
             final_output = json.loads(json_str)
         except json.JSONDecodeError as e:
             query_for_log = query[6:26] + '...' if len(query) > 50 else query
+            print(json_str)
+            print('NG: json_str')
             print(f"エラー ({query_for_log}): API応答のJSON解析に失敗しました: {e}", file=sys.stderr)
             final_output = {
                 "status": "error", "error": "Failed to parse API response",
