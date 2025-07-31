@@ -21,10 +21,11 @@ if 'GOOGLE_API_KEY' in os.environ:
 # --- 1件ごとの追記処理のための、ファイル書き込みロック ---
 file_write_lock = asyncio.Lock()
 
-import json
-import sys
+MODEL_NAME = 'gemini-2.5-flash'
 
-def split_json_by_status(input_file='output.json'):
+
+
+def split_json_by_status(input_file='log/output.json'):
     """
     指定されたJSONファイルを読み込み、'status'キーの値に応じて、
     'success.json' と 'terminated.json' に分割して出力する。
@@ -61,14 +62,14 @@ def split_json_by_status(input_file='output.json'):
                 other_items_count += 1
         
         # --- 4. 'success.json' に書き込む ---
-        success_filename = 'success.json'
+        success_filename = 'log/success.json'
         print(f"'{success_filename}' に {len(success_items)} 件のデータを書き込んでいます...")
         with open(success_filename, 'w', encoding='utf-8') as f:
             # indent=2 で見やすい形式に整形し、ensure_ascii=Falseで日本語の文字化けを防ぐ
             json.dump(success_items, f, indent=2, ensure_ascii=False)
             
         # --- 5. 'terminated.json' に書き込む ---
-        terminated_filename = 'terminated.json'
+        terminated_filename = 'log/terminated.json'
         print(f"'{terminated_filename}' に {len(terminated_items)} 件のデータを書き込んでいます...")
         with open(terminated_filename, 'w', encoding='utf-8') as f:
             json.dump(terminated_items, f, indent=2, ensure_ascii=False)
@@ -93,7 +94,7 @@ def split_json_by_status(input_file='output.json'):
         }
         
         # --- 7. サマリーを 'summary.json' に書き込む ---
-        summary_filename = 'summary.json'
+        summary_filename = 'log/summary.json'
         print(f"処理結果のサマリーを '{summary_filename}' に書き込んでいます...")
         with open(summary_filename, 'w', encoding='utf-8') as f:
             json.dump(summary_data, f, indent=2, ensure_ascii=False)
@@ -143,7 +144,7 @@ def _blocking_call_to_gemini(api_key: str, full_contents: str, query_for_log_bas
                 print(f"({query_for_log}) AIが思考を開始します...", file=sys.stderr)
             api_call_start_time = time.time()
             stream = client.models.generate_content_stream(
-                model='gemini-2.5-flash', 
+                model=MODEL_NAME, 
                 contents=full_contents, 
                 config=config
             )
@@ -298,7 +299,7 @@ async def process_query_task(query: str, semaphore: asyncio.Semaphore, output_fi
             input_key = await api_key_manager.get_next_key()
             if input_key:
                 input_token_response = await asyncio.to_thread(
-                    _blocking_count_tokens, input_key, 'gemini-2.5-flash', full_contents
+                    _blocking_count_tokens, input_key, MODEL_NAME, full_contents
                 )
                 if input_token_response: 
                     input_tokens = input_token_response.total_tokens
@@ -309,7 +310,7 @@ async def process_query_task(query: str, semaphore: asyncio.Semaphore, output_fi
             if thinking_text:
                 if thinking_key:
                     thinking_token_response = await asyncio.to_thread(
-                        _blocking_count_tokens, thinking_key, 'gemini-2.5-flash', thinking_text
+                        _blocking_count_tokens, thinking_key, MODEL_NAME, thinking_text
                     )
                     if thinking_token_response: 
                         thinking_tokens = thinking_token_response.total_tokens
@@ -320,7 +321,7 @@ async def process_query_task(query: str, semaphore: asyncio.Semaphore, output_fi
             if answer_text:
                 if answer_key:
                     answer_token_response = await asyncio.to_thread(
-                        _blocking_count_tokens, answer_key, 'gemini-2.5-flash', answer_text
+                        _blocking_count_tokens, answer_key, MODEL_NAME, answer_text
                     )
                     if answer_token_response: 
                         answer_tokens = answer_token_response.total_tokens
@@ -386,7 +387,19 @@ async def main():
     parser.add_argument("--parallel", type=int, default=5, help="最大並列実行数（デフォルト: 5）")
     args = parser.parse_args()
     
-    output_filename = "output.json"
+    log_directory = "log"
+
+    # フォルダが存在しないかチェック
+    if not os.path.exists(log_directory):
+        # 存在しない場合のみ、フォルダを作成
+        os.makedirs(log_directory)
+        print(f"フォルダ '{log_directory}' を作成しました。")
+    else:
+        # 既に存在する場合
+        print(f"フォルダ '{log_directory}' は既に存在します。")
+    
+    output_filename = "log/output.json"
+
     
     #try:
     #    if os.path.exists(output_filename):

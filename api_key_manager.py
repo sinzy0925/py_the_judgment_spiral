@@ -91,7 +91,7 @@ class ApiKeyManager:
         try:
             # inspect.stack()は[0]が現在のフレーム、[1]が呼び出し元のフレーム
             caller_frame = inspect.stack()[1]
-            caller_info = f"呼び出し元: {os.path.basename(caller_frame.filename)}:{caller_frame.lineno}"
+            caller_info = f"From: {os.path.basename(caller_frame.filename)}:{caller_frame.lineno}"
         except IndexError:
             caller_info = "呼び出し元: 不明"
         # --- ▲▲▲ 修正ポイント2: 呼び出し元の情報を取得 ---
@@ -103,7 +103,7 @@ class ApiKeyManager:
             selected_key = self._api_keys[self._current_index]
             
             # --- ▼▼▼ 修正ポイント3: ログに呼び出し元情報を追加 ▼▼▼ ---
-            print(f"[{self.__class__.__name__}] APIkey: idx: {self._current_index}, key: {selected_key[-4:]} <{caller_info}>")
+            print(f"[{self.__class__.__name__}] APIkey:idx:{self._current_index}, key:{selected_key[-4:]}[{caller_info}]")
             
             return selected_key
 
