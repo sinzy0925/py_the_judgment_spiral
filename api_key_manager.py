@@ -1,8 +1,8 @@
-# api_key_manager.py (修正後)
 import os
 import json
 import asyncio
 from dotenv import load_dotenv
+import inspect  # --- ▼▼▼ 修正ポイント1: inspectモジュールをインポート ▼▼▼ ---
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
@@ -29,12 +29,6 @@ class ApiKeyManager:
 
         self._api_keys: list[str] = []
         self._current_index: int = -1
-        
-        # --- ▼▼▼ 修正ポイント2: 不要な変数を削除 ▼▼▼ ---
-        # self._last_access_time: float = 0.0
-        # self._COOLDOWN_SECONDS = 1.0
-        # --- ▲▲▲ 修正ポイント2: 不要な変数を削除 ▲▲▲ ---
-
         self._key_selection_lock = asyncio.Lock()
         
         self._load_api_keys_from_env()
@@ -93,26 +87,25 @@ class ApiKeyManager:
             print("エラー: 利用可能なAPIキーがありません。")
             return None
 
+        # --- ▼▼▼ 修正ポイント2: 呼び出し元の情報を取得 ---
+        try:
+            # inspect.stack()は[0]が現在のフレーム、[1]が呼び出し元のフレーム
+            caller_frame = inspect.stack()[1]
+            caller_info = f"呼び出し元: {os.path.basename(caller_frame.filename)}:{caller_frame.lineno}"
+        except IndexError:
+            caller_info = "呼び出し元: 不明"
+        # --- ▲▲▲ 修正ポイント2: 呼び出し元の情報を取得 ---
+
         async with self._key_selection_lock:
-            # --- ▼▼▼ 修正ポイント1: クールダウン（待機）ロジックを完全に削除 ---
-            # 前回の呼び出しからクールダウン時間内に再度呼び出された場合、待機する
-            # ループの初回実行時などを考慮し、self._last_access_timeが0より大きい場合のみチェック
-            # if self._last_access_time > 0:
-            #     now = asyncio.get_event_loop().time()
-            #     elapsed_time = now - self._last_access_time
-            #     if elapsed_time < self._COOLDOWN_SECONDS:
-            #         wait_time = self._COOLDOWN_SECONDS - elapsed_time
-            #         await asyncio.sleep(wait_time)
-            # --- ▲▲▲ 修正ポイント1: クールダウン（待機）ロジックを完全に削除 ▲▲▲ ---
-            
             # ラウンドロビン方式で次のインデックスを計算
             self._current_index = (self._current_index + 1) % len(self._api_keys)
             
-            # --- ▼▼▼ 修正ポイント2: 不要な変数の更新を削除 ▼▼▼ ---
-            # self._last_access_time = asyncio.get_event_loop().time()
-            # --- ▲▲▲ 修正ポイント2: 不要な変数の更新を削除 ▲▲▲ ---
+            selected_key = self._api_keys[self._current_index]
             
-            return self._api_keys[self._current_index]
+            # --- ▼▼▼ 修正ポイント3: ログに呼び出し元情報を追加 ▼▼▼ ---
+            print(f"[{self.__class__.__name__}] APIkey: idx: {self._current_index}, key: {selected_key[-4:]} <{caller_info}>")
+            
+            return selected_key
 
     @property
     def last_used_key_info(self) -> dict:

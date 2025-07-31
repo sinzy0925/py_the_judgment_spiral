@@ -4,3 +4,5 @@ log/
 codeB.py
 code_output.txt
 output.json
+success.json
+terminated.json

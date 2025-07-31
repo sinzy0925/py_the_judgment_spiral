@@ -93,16 +93,19 @@ def split_json_by_status(input_file='output.json'):
         sys.exit(1)
 
 def _blocking_call_to_gemini(api_key: str, full_contents: str, query_for_log_base: str, parallel_count: int):
-    # バグ修正済みのリトライ機能付き関数
+    # Geminiを呼び出すメイン関数　リトライ機能付き
+    # 単独処理の場合は、AI思考ログを出力する。
+    # 並列処理の場合は、AI思考ログを出力しない。
     query_for_log = query_for_log_base[6:26] + '...' if len(query_for_log_base) > 50 else query_for_log_base
-    MAX_RETRIES = 3
-    INITIAL_DELAY = 5
+    MAX_RETRIES = 3    # リトライ回数
+    INITIAL_DELAY = 10 # リトライまでの待ち時間
 
     for attempt in range(MAX_RETRIES):
         try:
             if not api_key:
                 print(f"\nエラー ({query_for_log}): 有効なAPIキーがありません。", file=sys.stderr)
                 return None, None
+
             client = genai.Client(api_key=api_key)
             config = types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())],
@@ -111,11 +114,14 @@ def _blocking_call_to_gemini(api_key: str, full_contents: str, query_for_log_bas
             if attempt == 0:
                 print(f"({query_for_log}) AIが思考を開始します...", file=sys.stderr)
             api_call_start_time = time.time()
-            stream = client.models.generate_content_stream(model='gemini-2.5-flash', contents=full_contents, config=config)
+            stream = client.models.generate_content_stream(
+                model='gemini-2.5-flash', 
+                contents=full_contents, 
+                config=config
+            )
             
             thinking_text, answer_text = "", ""
             
-            # --- ▼▼▼ ここからが修正箇所です ▼▼▼ ---
             
             is_first_thought = True # 思考ログの初回かどうかを判定するフラグ
             
@@ -145,30 +151,41 @@ def _blocking_call_to_gemini(api_key: str, full_contents: str, query_for_log_bas
                     else:
                         answer_text += part.text
 
-            if not is_first_thought:
-                if parallel_count <= 1:
-                    # 思考ログが表示された場合、見やすくするために最後に改行を入れる
-                    print("", file=sys.stderr)
+            if not is_first_thought and parallel_count <= 1:
+                # 思考ログが表示された場合、見やすくするために最後に改行を入れる
+                print("", file=sys.stderr)
 
-            # --- ▲▲▲ ここまでが修正箇所です ▲▲▲ ---
 
             elapsed = time.time() - api_call_start_time
-            print(f"({query_for_log}) 全ストリーム受信完了 ({elapsed:.2f}s)。", file=sys.stderr)
+            #print(f"({query_for_log}) 全ストリーム受信完了 ({elapsed:.2f}s)。", file=sys.stderr)
             return thinking_text, answer_text
             
-        except exceptions.ResourceExhausted as e:
-            if attempt < MAX_RETRIES - 1:
-                delay = INITIAL_DELAY * (attempt + 1)
-                print(f"\n警告 ({query_for_log}): APIレートリミットです。{delay}秒待機して再試行します... (試行 {attempt + 2}/{MAX_RETRIES})", file=sys.stderr)
-                time.sleep(delay)
-            else:
-                print(f"\nエラー ({query_for_log}): 最大リトライ回数({MAX_RETRIES}回)を超えました。メインAPIコール失敗。", file=sys.stderr)
-                return None, None
+        # --- ▼▼▼ 例外処理を修正 ▼▼▼ ---
         except Exception as e:
-            print(f"\nストリームの処理中に予期せぬエラーが発生しました ({query_for_log}): {e}", file=sys.stderr)
-            return None, None
+            error_message = str(e).lower()
+            # 429 レートリミットエラーかどうかを文字列で判定
+            if "429" in error_message and "resource_exhausted" in error_message:
+                if attempt < MAX_RETRIES - 1:
+                    # 待機時間を指数関数的に増やす (10秒, 20秒, 40秒...)
+                    delay = INITIAL_DELAY * (2 ** attempt)
+                    print(f"\n警告 ({query_for_log}): APIレートリミットです。{delay}秒待機して再試行します... (試行 {attempt + 1}/{MAX_RETRIES})", file=sys.stderr)
+                    time.sleep(delay)
+                    # 次のループでリトライを試みる
+                    continue
+                else:
+                    print(f"\nエラー ({query_for_log}): APIレートリミットによる最大リトライ回数({MAX_RETRIES}回)を超えました。", file=sys.stderr)
+                    # ループを抜けて失敗を返す
+                    return None, None
+            else:
+                # 429以外の予期せぬエラー
+                print(f"\nストリームの処理中に予期せぬエラーが発生しました ({query_for_log}): {e}", file=sys.stderr)
+                # リトライせずに失敗を返す
+                return None, None
+        # --- ▲▲▲ 例外処理を修正 ▲▲▲ ---
             
+    # forループがすべて失敗した場合
     return None, None
+
 
 def _blocking_count_tokens(api_key: str, model: str, contents: str) -> types.CountTokensResponse | None:
     if not api_key: return None
@@ -179,8 +196,13 @@ def _blocking_count_tokens(api_key: str, model: str, contents: str) -> types.Cou
         print(f"\nトークン計算中にエラーが発生しました ({contents[:30]}...): {e}", file=sys.stderr)
         return None
 
-# --- ▼▼▼ --parallelの値を判定し、1件ずつ追記する、完全版のタスク関数 ▼▼▼ ---
 async def process_query_task(query: str, semaphore: asyncio.Semaphore, output_filename: str, parallel_count: int):
+    # プロンプト、ファイル出力など
+    # 単独処理の場合は、トークン数を計算する。
+    # 並列処理の場合は、トークン数を計算しない。（APIコールを減らして、並列度を高める為）
+
+    query_for_log = query[6:30] + '...' if len(query) > 50 else query
+
     async with semaphore:
         start_time = time.time()
         
@@ -189,10 +211,10 @@ async def process_query_task(query: str, semaphore: asyncio.Semaphore, output_fi
 - {company_name}
 # 上記の企業について、ルールに従い、以下のJSON形式で出力してください。
 # 厳守すべきルール
-1. 入力された、会社名　住所の情報から、出力内容を特定してください。
-2. ファクトチェックの徹底:名称と住所を基に、正しい業種を再検証してください。
+1. 入力された、法人番号、法人名、住所の情報から、出力内容を特定してください。
+2. ファクトチェックの徹底:法人番号、法人名、住所を基に、正しい業種を再検証してください。
 3. 欠損情報の扱い:調査しても情報が見つからない場合は、項目の値を `不明` としてください。
-4. 以下の４つの主要調査項目のうち、２項目が見つからなければ、即座に調査を中止し、下記の「調査中断レポート」を出力してください。
+4. 以下の４つの主要調査項目のうち、３項目が見つからなければ、即座に調査を中止し、下記の「調査中断レポート」を出力してください。
    主要調査項目（４項目）：`officialUrl`, `industry`, `email`, `tel`
 5. 上記4.に抵触しなかった場合のみ、収集した情報を下記の「通常調査レポート」の形式で出力してください。
 # 出力形式 (JSON)
@@ -201,7 +223,7 @@ async def process_query_task(query: str, semaphore: asyncio.Semaphore, output_fi
 {{
   "status": "terminated",
   "error": "Required information could not be found.",
-  "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+  "message": "主要調査項目のうち３項目以上が不明だったため、調査を中断しました。",
   "targetCompany": "{company_name}"
 }}```
 # 通常調査レポート
@@ -220,49 +242,60 @@ async def process_query_task(query: str, semaphore: asyncio.Semaphore, output_fi
     "capital": "資本金（string）",
     "founded": "設立年月（string）",
     "businessSummary": "事業内容の簡潔な要約（string）",
-    "strengths": "企業の強みや特徴（string）"
+    "strengths": "企業の強みや特徴の簡潔な要約（string）"
   }}
 }}```
 """
         full_contents = prompt_template.format(company_name=query)
 
+        # トークン数の初期化
         input_tokens, thinking_tokens, answer_tokens = 0, 0, 0
 
-        #print(parallel_count)
-        #print('parallel_count')
 
-        input_key = await api_key_manager.get_next_key()
-        if input_key and parallel_count <= 1:
-            input_token_response = await asyncio.to_thread(
-                _blocking_count_tokens, input_key, 'gemini-2.5-flash', full_contents
-            )
-            if input_token_response: input_tokens = input_token_response.total_tokens
-
+        # メインのAPIコール　絶対に必要な処理
         main_call_key = await api_key_manager.get_next_key()
         if not main_call_key:
             return None
+        start = time.time()
         thinking_text, answer_text = await asyncio.to_thread(
             _blocking_call_to_gemini, main_call_key, full_contents, query,parallel_count
         )
 
         if thinking_text is None and answer_text is None:
             return None
+        elapsed = time.time() - start
 
-        if thinking_text and parallel_count <= 1:
+        # input_tokensの計算　並列実行時は不要
+        if parallel_count <= 1:
+            input_key = await api_key_manager.get_next_key()
+            if input_key:
+                input_token_response = await asyncio.to_thread(
+                    _blocking_count_tokens, input_key, 'gemini-2.5-flash', full_contents
+                )
+                if input_token_response: 
+                    input_tokens = input_token_response.total_tokens
+
+        # thinking_tokensの計算　並列実行時は不要
+        if parallel_count <= 1:
             thinking_key = await api_key_manager.get_next_key()
-            if thinking_key:
-                thinking_token_response = await asyncio.to_thread(
-                    _blocking_count_tokens, thinking_key, 'gemini-2.5-flash', thinking_text
-                )
-                if thinking_token_response: thinking_tokens = thinking_token_response.total_tokens
+            if thinking_text:
+                if thinking_key:
+                    thinking_token_response = await asyncio.to_thread(
+                        _blocking_count_tokens, thinking_key, 'gemini-2.5-flash', thinking_text
+                    )
+                    if thinking_token_response: 
+                        thinking_tokens = thinking_token_response.total_tokens
 
-        if answer_text and parallel_count <= 1:
+        # answer_tokensの計算　並列実行時は不要
+        if parallel_count <= 1:
             answer_key = await api_key_manager.get_next_key()
-            if answer_key:
-                answer_token_response = await asyncio.to_thread(
-                    _blocking_count_tokens, answer_key, 'gemini-2.5-flash', answer_text
-                )
-                if answer_token_response: answer_tokens = answer_token_response.total_tokens
+            if answer_text:
+                if answer_key:
+                    answer_token_response = await asyncio.to_thread(
+                        _blocking_count_tokens, answer_key, 'gemini-2.5-flash', answer_text
+                    )
+                    if answer_token_response: 
+                        answer_tokens = answer_token_response.total_tokens
 
         end_time = time.time()
         time_tokens_info = {
@@ -310,7 +343,7 @@ async def process_query_task(query: str, semaphore: asyncio.Semaphore, output_fi
             try:
                 with open(output_filename, 'w', encoding='utf-8') as f:
                     json.dump(all_data, f, indent=2, ensure_ascii=False)
-                print(f"({query_for_log}) 結果を {output_filename} に追記しました。", file=sys.stderr)
+                print(f"({query_for_log}) 全ストリーム受信完了({elapsed:.2f}s) {output_filename} に追記済 ", file=sys.stderr)
             except IOError as e:
                  print(f"エラー ({query_for_log}): ファイル書き込みに失敗: {e}", file=sys.stderr)
 
@@ -369,6 +402,7 @@ async def main():
 
 if __name__ == "__main__":
     exit_code = 0
+    start_time1 = time.time()
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
@@ -378,5 +412,8 @@ if __name__ == "__main__":
         print(f"予期せぬ致命的なエラーが発生しました: {e}", file=sys.stderr)
         exit_code = 1
     finally:
+        end_time1 = time.time()
+        print(f"time: {round(end_time1 - start_time1, 2)} s")
         api_key_manager.save_session()
         print("[INFO] アプリケーション終了に伴いセッションを保存しました。", file=sys.stderr)
+        sys.exit(0)
