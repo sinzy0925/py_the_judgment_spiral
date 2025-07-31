@@ -73,14 +73,42 @@ def split_json_by_status(input_file='output.json'):
         with open(terminated_filename, 'w', encoding='utf-8') as f:
             json.dump(terminated_items, f, indent=2, ensure_ascii=False)
             
-        # --- 6. 処理結果のサマリーを表示 ---
+        # --- ▼▼▼ ここから修正箇所 ▼▼▼ ---
+
+        # --- 6. 処理結果のサマリーをJSONオブジェクトとして作成 ---
+        summary_data = {
+            "total_read_count": len(data),
+            "success": {
+                "count": len(success_items),
+                "filename": success_filename
+            },
+            "terminated": {
+                "count": len(terminated_items),
+                "filename": terminated_filename
+            },
+            "other": {
+                "count": other_items_count,
+                "description": "statusが'success'でも'terminated'でもない、またはstatusキーが存在しないアイテム"
+            }
+        }
+        
+        # --- 7. サマリーを 'summary.json' に書き込む ---
+        summary_filename = 'summary.json'
+        print(f"処理結果のサマリーを '{summary_filename}' に書き込んでいます...")
+        with open(summary_filename, 'w', encoding='utf-8') as f:
+            json.dump(summary_data, f, indent=2, ensure_ascii=False)
+            
+        # --- 8. 処理結果のサマリーをコンソールにも表示（従来通り） ---
         print("\n--- 処理完了 ---")
-        print(f"読み込み総件数: {len(data)}件")
-        print(f" -> '{success_filename}': {len(success_items)}件")
-        print(f" -> '{terminated_filename}': {len(terminated_items)}件")
-        if other_items_count > 0:
-            print(f" -> 対象外（statusが'success'でも'terminated'でもないもの）: {other_items_count}件")
+        print(f"読み込み総件数: {summary_data['total_read_count']}件")
+        print(f" -> '{summary_data['success']['filename']}': {summary_data['success']['count']}件")
+        print(f" -> '{summary_data['terminated']['filename']}': {summary_data['terminated']['count']}件")
+        if summary_data['other']['count'] > 0:
+            print(f" -> 対象外の件数: {summary_data['other']['count']}件")
+        print(f" -> サマリーファイル: '{summary_filename}' が作成されました。")
         print("------------------")
+        
+        # --- ▲▲▲ ここまで修正箇所 ▲▲▲ ---
 
     except FileNotFoundError:
         print(f"エラー: ファイル '{input_file}' が見つかりません。", file=sys.stderr)
