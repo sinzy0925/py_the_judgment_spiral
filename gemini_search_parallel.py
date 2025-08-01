@@ -338,24 +338,39 @@ async def process_query_task(query: str, semaphore: asyncio.Semaphore, output_fi
         final_output = {}
         try:
             json_str = None
+            # パターン1: マークダウンのJSONブロックを探す (最も優先)
             match = re.search(r"```json(.*)```", answer_text, re.DOTALL)
             if match:
                 json_str = match.group(1).strip()
             else:
-                json_str = answer_text.strip()
+                # パターン2: マークダウンがない場合、応答から最初に見つかる '{' から最後の '}' までを抽出する
+                # これにより、AIの思考ログのような前置きテキストを無視できる
+                start_index = answer_text.find('{')
+                end_index = answer_text.rfind('}')
+                if start_index != -1 and end_index != -1 and start_index < end_index:
+                    json_str = answer_text[start_index : end_index + 1].strip()
+                else:
+                    # JSONの開始・終了文字が見つからない場合は、応答全体をそのまま渡す
+                    json_str = answer_text.strip()
+
             if not json_str:
                 raise json.JSONDecodeError("抽出後のJSON文字列が空です", "", 0)
+            
             final_output = json.loads(json_str)
+
         except json.JSONDecodeError as e:
             query_for_log = query[6:26] + '...' if len(query) > 50 else query
-            print(json_str)
             print('NG: json_str')
+            # エラーデバッグのために、どの文字列でパースに失敗したかを出力する
+            print(f"--- JSONパースに失敗した文字列 (json_str) ---", file=sys.stderr)
+            print(json_str, file=sys.stderr)
+            print(f"------------------------------------------", file=sys.stderr)
             print(f"エラー ({query_for_log}): API応答のJSON解析に失敗しました: {e}", file=sys.stderr)
             final_output = {
                 "status": "error", "error": "Failed to parse API response",
                 "message": f"APIからの応答をJSONとして解析できませんでした。", "raw_response": answer_text
             }
-        
+
         final_output["time_tokens"] = time_tokens_info
         
         # --- 1件ごとのファイル追記処理 ---
@@ -430,7 +445,7 @@ async def main():
         
         successful_results = [res for res in results if res is not None]
         print(f"\n--- 全タスク完了: {len(successful_results)} / {len(queries)} 件の処理に成功 ---", file=sys.stderr)
-        print(json.dumps(successful_results, indent=2, ensure_ascii=False))
+        #print(json.dumps(successful_results, indent=2, ensure_ascii=False))
         split_json_by_status(output_filename)
         
     else: # 単一実行モード
