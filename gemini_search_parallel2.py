@@ -11,9 +11,9 @@ from dotenv import load_dotenv
 import json
 import re
 from google.api_core import exceptions
-from api_key_manager import api_key_manager
+from api_key_manager2 import api_key_manager
 
-load_dotenv()
+#load_dotenv()
 
 if 'GOOGLE_API_KEY' in os.environ:
     del os.environ['GOOGLE_API_KEY']
@@ -23,7 +23,7 @@ file_write_lock = asyncio.Lock()
 
 MODEL_NAME = 'gemini-2.5-flash'
 
-LOG_DIR = "log"
+LOG_DIR = "log2"
 
 def split_json_by_status(input_file=f'{LOG_DIR}/output.json'):
     """
@@ -62,14 +62,14 @@ def split_json_by_status(input_file=f'{LOG_DIR}/output.json'):
                 other_items_count += 1
         
         # --- 4. 'success.json' に書き込む ---
-        success_filename = 'log/success.json'
+        success_filename = f'{LOG_DIR}/success.json'
         print(f"'{success_filename}' に {len(success_items)} 件のデータを書き込んでいます...")
         with open(success_filename, 'w', encoding='utf-8') as f:
             # indent=2 で見やすい形式に整形し、ensure_ascii=Falseで日本語の文字化けを防ぐ
             json.dump(success_items, f, indent=2, ensure_ascii=False)
             
         # --- 5. 'terminated.json' に書き込む ---
-        terminated_filename = 'log/terminated.json'
+        terminated_filename = f'{LOG_DIR}/terminated.json'
         print(f"'{terminated_filename}' に {len(terminated_items)} 件のデータを書き込んでいます...")
         with open(terminated_filename, 'w', encoding='utf-8') as f:
             json.dump(terminated_items, f, indent=2, ensure_ascii=False)
@@ -94,7 +94,7 @@ def split_json_by_status(input_file=f'{LOG_DIR}/output.json'):
         }
         
         # --- 7. サマリーを 'summary.json' に書き込む ---
-        summary_filename = 'log/summary.json'
+        summary_filename = f'{LOG_DIR}/summary.json'
         print(f"処理結果のサマリーを '{summary_filename}' に書き込んでいます...")
         with open(summary_filename, 'w', encoding='utf-8') as f:
             json.dump(summary_data, f, indent=2, ensure_ascii=False)
@@ -232,7 +232,7 @@ async def process_query_task(query: str, semaphore: asyncio.Semaphore, output_fi
     # 単独処理の場合は、トークン数を計算する。
     # 並列処理の場合は、トークン数を計算しない。（APIコールを減らして、並列度を高める為）
 
-    query_for_log = query[6:30] + '...' if len(query) > 50 else query
+    query_for_log = query[6:26] + '...' if len(query) > 50 else query
     log_prefix = f"Task {task_id}: {query_for_log}"
 
     async with semaphore:
@@ -391,7 +391,7 @@ async def process_query_task(query: str, semaphore: asyncio.Semaphore, output_fi
             try:
                 with open(output_filename, 'w', encoding='utf-8') as f:
                     json.dump(all_data, f, indent=2, ensure_ascii=False)
-                print(f"({log_prefix}) 全ストリーム受信完了({elapsed:.2f}s) {output_filename} に追記済 ", file=sys.stderr)
+                print(f"({log_prefix}) 処理完了({elapsed:.2f}s) {output_filename} に追記済 ", file=sys.stderr)
             except IOError as e:
                  print(f"エラー ({log_prefix}): ファイル書き込みに失敗: {e}", file=sys.stderr)
 
@@ -415,7 +415,7 @@ async def main():
         # 既に存在する場合
         print(f"フォルダ '{log_directory}' は既に存在します。")
     
-    output_filename = "log/output.json"
+    output_filename = f"{log_directory}/output.json"
 
     
     #try:
