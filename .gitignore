@@ -1,5 +1,6 @@
 __pycache__/
 log/
+log*/
 .env
 codeB.py
 code_output.txt
