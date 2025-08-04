@@ -25,6 +25,13 @@ MODEL_NAME = 'gemini-2.5-flash'
 
 LOG_DIR = "log1"
 
+LINES_PER_QUERY = 3
+# --- ▼▼▼ この変数を追加 ▼▼▼ ---
+# 1クエリあたりにまとめる行数をここで指定
+# 1 => 1行で1件
+# 2 => 2行で1件
+# --- ▲▲▲ この変数を追加 ▲▲▲ ---
+
 def split_json_by_status(input_file=f'{LOG_DIR}/output.json'):
     """
     指定されたJSONファイルを読み込み、'status'キーの値に応じて、
@@ -121,12 +128,20 @@ def split_json_by_status(input_file=f'{LOG_DIR}/output.json'):
         print(f"予期せぬエラーが発生しました: {e}", file=sys.stderr)
         sys.exit(1)
 
-def _blocking_call_to_gemini(api_key: str, full_contents: str, query_for_log_base: str, parallel_count: int, task_id: int):
-    # Geminiを呼び出すメイン関数　リトライ機能付き
+#def _blocking_call_to_gemini(api_key: str, full_contents: str, query_for_log_base: str, parallel_count: int, task_id: int):
+def test_blocking_call_to_gemini(
+    loop: asyncio.AbstractEventLoop,
+    api_key_manager, # ApiKeyManagerのインスタンス
+    api_key: str, 
+    full_contents: str, 
+    query_for_log_base: str, 
+    parallel_count: int, 
+    task_id: int
+):    # Geminiを呼び出すメイン関数　リトライ機能付き
     # 単独処理の場合は、AI思考ログを出力する。
     # 並列処理の場合は、AI思考ログを出力しない。
     query_for_log = query_for_log_base[6:26] + '...' if len(query_for_log_base) > 50 else query_for_log_base
-    log_prefix = f"Task {task_id}: {query_for_log}"
+    log_prefix = f"Task{task_id} API {api_key[-6:]} {query_for_log}"
     MAX_RETRIES = 3    # リトライ回数
     INITIAL_DELAY = 10 # リトライまでの待ち時間
 
@@ -208,15 +223,138 @@ def _blocking_call_to_gemini(api_key: str, full_contents: str, query_for_log_bas
                     return None, None
             else:
                 # 429以外の予期せぬエラー
+                print(answer_text)
+                print('answer_text')
                 print(f"\nストリームの処理中に予期せぬエラーが発生しました ({log_prefix}): {e}", file=sys.stderr)
                 # リトライせずに失敗を返す
-                return None, None
-        # --- ▲▲▲ 例外処理を修正 ▲▲▲ ---
+                if attempt < MAX_RETRIES - 1:
+                    # 待機時間を指数関数的に増やす (10秒, 20秒, 40秒...)
+                    delay = INITIAL_DELAY * (2 ** attempt)
+                    print(f"\n警告 ({log_prefix}): 予期せぬエラー対応。{delay}秒待機して再試行します... (試行 {attempt + 1}/{MAX_RETRIES})", file=sys.stderr)
+                    time.sleep(delay)
+                    # 次のループでリトライを試みる
+                    continue
+                else:
+                    print(f"\nエラー ({log_prefix}): 予期せぬエラー対応よる最大リトライ回数({MAX_RETRIES}回)を超えました。", file=sys.stderr)
+                    # ループを抜けて失敗を返す
+                    return None, None
+                # --- ▲▲▲ 例外処理を修正 ▲▲▲ ---
             
     # forループがすべて失敗した場合
     return None, None
 
+# ★★★ 引数に loop と api_key_manager を追加 ★★★
+def _blocking_call_to_gemini(
+    loop: asyncio.AbstractEventLoop,
+    api_key_manager, # ApiKeyManagerのインスタンス
+    api_key: str, 
+    full_contents: str, 
+    query_for_log_base: str, 
+    parallel_count: int, 
+    task_id: int
+):
+    # Geminiを呼び出すメイン関数　リトライ機能付き
+    query_for_log = query_for_log_base[6:26] + '...' if len(query_for_log_base) > 50 else query_for_log_base
+    MAX_RETRIES = 3
+    INITIAL_DELAY = 10
 
+    # ★★★ ループ内で変化する可能性があるため、ループの外で初期化 ★★★
+    current_api_key = api_key
+
+    for attempt in range(MAX_RETRIES):
+        # ★★★ 常に最新のキー情報でログを出力するため、log_prefixはループ内で定義 ★★★
+        log_prefix = f"Task{task_id} API {current_api_key[-6:]} {query_for_log}"
+
+        try:
+            if not current_api_key:
+                print(f"\nエラー ({log_prefix}): 有効なAPIキーがありません。", file=sys.stderr)
+                return None, None
+
+            # ★★★ 現在のキー(current_api_key)でクライアントを初期化 ★★★
+            client = genai.Client(api_key=current_api_key)
+            config = types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                thinking_config=types.ThinkingConfig(thinking_budget=-1, include_thoughts=True)
+            )
+            if attempt == 0:
+                print(f"({log_prefix}) AIが思考を開始します...", file=sys.stderr)
+            
+            # (...既存のストリーム処理部分は変更なし...)
+            api_call_start_time = time.time()
+            stream = client.models.generate_content_stream(model=MODEL_NAME, contents=full_contents, config=config)
+            thinking_text, answer_text = "", ""
+            is_first_thought = True
+            for chunk in stream:
+                if not chunk.candidates: continue
+                if hasattr(chunk.candidates[0].content, 'parts'): parts = chunk.candidates[0].content.parts
+                else: parts = []
+                for part in parts:
+                    if not hasattr(part, 'text') or not part.text: continue
+                    is_thought = hasattr(part, 'thought') and part.thought
+                    if is_thought and parallel_count <= 1:
+                        if is_first_thought :
+                            print(f"\n--- AIの思考プロセス ({log_prefix}) ---", file=sys.stderr)
+                            is_first_thought = False
+                        print(part.text, end="", flush=True, file=sys.stderr)
+                        thinking_text += part.text
+                    else:
+                        answer_text += part.text
+            if not is_first_thought and parallel_count <= 1:
+                print("", file=sys.stderr)
+
+            # ★★★ 成功した場合は、結果を返してループを抜ける ★★★
+            return thinking_text, answer_text
+            
+        except Exception as e:
+            error_message = str(e).lower()
+            if "429" in error_message and "resource_exhausted" in error_message:
+                if attempt < MAX_RETRIES - 1:
+                    delay = INITIAL_DELAY * (2 ** attempt)
+                    print(f"\n警告 ({log_prefix}): API Limit! {delay}秒待機+再試行({attempt + 1}/{MAX_RETRIES})", file=sys.stderr)
+                    
+                    # --- ▼▼▼ リトライ用の新しいキーを取得する処理 ▼▼▼ ---
+                    try:
+                        # 非同期の get_next_key を別スレッドから安全に呼び出す
+                        future = asyncio.run_coroutine_threadsafe(api_key_manager.get_next_key(), loop)
+                        # 結果を同期的に待つ (タイムアウトを5秒に設定)
+                        new_key = future.result(timeout=5)
+                        
+                        if new_key and new_key != current_api_key:
+                            current_api_key = new_key  # ★キーを更新
+                            #print(f"情報 ({log_prefix}): APIキーを新しいものに変更して再試行します。")
+                        else:
+                            print(f"警告 ({log_prefix}): 新しいキーを取得できませんでした。同じキーで再試行します。")
+                    except Exception as key_e:
+                        print(f"警告 ({log_prefix}): リトライ用のキー取得中にエラー: {key_e}。同じキーで再試行します。")
+                    # --- ▲▲▲ ここまで ▲▲▲ ---
+
+                    time.sleep(delay)
+                    continue # ループの先頭に戻り、新しいキーでリトライ
+                else:
+                    print(f"\nエラー ({log_prefix}): APIレートリミットによる最大リトライ回数({MAX_RETRIES}回)を超えました。", file=sys.stderr)
+                    return None, None
+            else:
+                # 429以外の予期せぬエラー
+                print(answer_text)
+                print('answer_text')
+                print(f"\nストリームの処理中に予期せぬエラーが発生しました ({log_prefix}): {e}", file=sys.stderr)
+                # リトライせずに失敗を返す
+                if attempt < MAX_RETRIES - 1:
+                    # 待機時間を指数関数的に増やす (10秒, 20秒, 40秒...)
+                    delay = INITIAL_DELAY * (2 ** attempt)
+                    print(f"\n警告 ({log_prefix}): 予期せぬエラー対応。{delay}秒待機して再試行します... (試行 {attempt + 1}/{MAX_RETRIES})", file=sys.stderr)
+                    time.sleep(delay)
+                    # 次のループでリトライを試みる
+                    continue
+                else:
+                    print(f"\nエラー ({log_prefix}): 予期せぬエラー対応よる最大リトライ回数({MAX_RETRIES}回)を超えました。", file=sys.stderr)
+                    # ループを抜けて失敗を返す
+                    return None, None
+                # --- ▲▲▲ 例外処理を修正 ▲▲▲ ---
+            
+            
+    # forループがすべて失敗した場合 (リトライ上限に達した場合)
+    return None, None
 
 def _blocking_count_tokens(api_key: str, model: str, contents: str) -> types.CountTokensResponse | None:
     if not api_key: return None
@@ -235,6 +373,9 @@ async def process_query_task(query: str, semaphore: asyncio.Semaphore, output_fi
     query_for_log = query[6:26] + '...' if len(query) > 50 else query
     log_prefix = f"Task {task_id}: {query_for_log}"
 
+    MAX_RETRIES = 3
+    INITIAL_DELAY = 10
+
     async with semaphore:
         start_time = time.time()
         
@@ -243,10 +384,13 @@ async def process_query_task(query: str, semaphore: asyncio.Semaphore, output_fi
 - {company_name}
 # 上記の企業について、ルールに従い、以下のJSON形式で出力してください。
 # 厳守すべきルール
+0. 入力される企業情報は複数あります。企業情報１件につき、１件のJSONオブジェクトで出力してください。
+   **もし入力に対して複数の企業情報が見つかった場合は、それぞれのJSONオブジェクトを個別の ```json ... ``` ブロックで囲って出力してください。**
 1. 欠損情報の扱い:調査しても情報が見つからない場合は、項目の値を `不明` としてください。
-2. 以下の４つの主要調査項目のうち、３項目が見つからなければ、即座に調査を中止し、下記の「調査中断レポート」を出力してください。
-   主要調査項目（４項目）：`officialUrl`, `industry`, `email`, `tel`
+2. 以下の３つの主要調査項目の全項目が見つからなければ、即座に調査を中止し、下記の「調査中断レポート」を出力してください。
+   主要調査項目（３項目）：`officialUrl`, `email`, `tel`
 3. 上記2.に抵触しなかった場合のみ、収集した情報を下記の「通常調査レポート」の形式で出力してください。
+4. # **「通常調査レポート」または「調査中断レポート」のJSONを、必ず1つ以上出力してください。それ以外のテキストは出力しないでください。**
 
 # 出力形式 (JSON)
 # 調査中断レポート
@@ -254,7 +398,7 @@ async def process_query_task(query: str, semaphore: asyncio.Semaphore, output_fi
 {{
   "status": "terminated",
   "error": "Required information could not be found.",
-  "message": "主要調査項目のうち３項目以上が不明だったため、調査を中断しました。",
+  "message": "主要調査３項目全てが不明だったため、調査を中断しました。",
   "targetCompany": "{company_name}"
 }}```
 # 通常調査レポート
@@ -267,7 +411,7 @@ async def process_query_task(query: str, semaphore: asyncio.Semaphore, output_fi
     "address": "本社の所在地（string）",
     "officialUrl": "公式サイトのURL（string）",
     "industry": "主要な業種（string）",
-    "email": "メールアドレス（string）",
+    "email": "メールアドレス（string）# 探し方:HTMLの<a>タグ mailto:を探すこと。",
     "tel": "代表電話番号（string）",
     "fax": "代表FAX番号（string）",
     "capital": "資本金（string）",
@@ -277,125 +421,161 @@ async def process_query_task(query: str, semaphore: asyncio.Semaphore, output_fi
   }}
 }}```
 """
-        full_contents = prompt_template.format(company_name=query)
+        for attempt in range(MAX_RETRIES):
 
-        # トークン数の初期化
-        input_tokens, thinking_tokens, answer_tokens = 0, 0, 0
+            full_contents = prompt_template.format(company_name=query)
+
+            # トークン数の初期化
+            input_tokens, thinking_tokens, answer_tokens = 0, 0, 0
 
 
-        # メインのAPIコール　絶対に必要な処理
-        main_call_key = await api_key_manager.get_next_key()
-        if not main_call_key:
-            return None
-        start = time.time()
-        thinking_text, answer_text = await asyncio.to_thread(
-            _blocking_call_to_gemini, main_call_key, full_contents, query, parallel_count, task_id
-        )
-
-        if thinking_text is None and answer_text is None:
-            return None
-        elapsed = time.time() - start
-
-        # input_tokensの計算　並列実行時は不要
-        if parallel_count <= 1:
-            input_key = await api_key_manager.get_next_key()
-            if input_key:
-                input_token_response = await asyncio.to_thread(
-                    _blocking_count_tokens, input_key, MODEL_NAME, full_contents
-                )
-                if input_token_response: 
-                    input_tokens = input_token_response.total_tokens
-
-        # thinking_tokensの計算　並列実行時は不要
-        if parallel_count <= 1:
-            thinking_key = await api_key_manager.get_next_key()
-            if thinking_text:
-                if thinking_key:
-                    thinking_token_response = await asyncio.to_thread(
-                        _blocking_count_tokens, thinking_key, MODEL_NAME, thinking_text
-                    )
-                    if thinking_token_response: 
-                        thinking_tokens = thinking_token_response.total_tokens
-
-        # answer_tokensの計算　並列実行時は不要
-        if parallel_count <= 1:
-            answer_key = await api_key_manager.get_next_key()
-            if answer_text:
-                if answer_key:
-                    answer_token_response = await asyncio.to_thread(
-                        _blocking_count_tokens, answer_key, MODEL_NAME, answer_text
-                    )
-                    if answer_token_response: 
-                        answer_tokens = answer_token_response.total_tokens
-
-        end_time = time.time()
-        time_tokens_info = {
-            "time": round(end_time - start_time, 2),
-            "input_tokens": input_tokens,
-            "thinking_tokens": thinking_tokens,
-            "answer_tokens": answer_tokens,
-            "total_tokens": input_tokens + thinking_tokens + answer_tokens
-        }
-
-        final_output = {}
-        try:
-            json_str = None
-            # パターン1: マークダウンのJSONブロックを探す (最も優先)
-            match = re.search(r"```json(.*)```", answer_text, re.DOTALL)
-            if match:
-                json_str = match.group(1).strip()
-            else:
-                # パターン2: マークダウンがない場合、応答から最初に見つかる '{' から最後の '}' までを抽出する
-                # これにより、AIの思考ログのような前置きテキストを無視できる
-                start_index = answer_text.find('{')
-                end_index = answer_text.rfind('}')
-                if start_index != -1 and end_index != -1 and start_index < end_index:
-                    json_str = answer_text[start_index : end_index + 1].strip()
-                else:
-                    # JSONの開始・終了文字が見つからない場合は、応答全体をそのまま渡す
-                    json_str = answer_text.strip()
-
-            if not json_str:
-                raise json.JSONDecodeError("抽出後のJSON文字列が空です", "", 0)
+            # メインのAPIコール　絶対に必要な処理
+            main_call_key = await api_key_manager.get_next_key()
+            if not main_call_key:
+                return None
             
-            final_output = json.loads(json_str)
+            loop = asyncio.get_running_loop()
 
-        except json.JSONDecodeError as e:
-            query_for_log = query[6:26] + '...' if len(query) > 50 else query
-            print('NG: json_str')
-            # エラーデバッグのために、どの文字列でパースに失敗したかを出力する
-            print(f"--- JSONパースに失敗した文字列 (json_str) ---", file=sys.stderr)
-            print(json_str, file=sys.stderr)
-            print(f"------------------------------------------", file=sys.stderr)
-            print(f"エラー ({log_prefix}): API応答のJSON解析に失敗しました: {e}", file=sys.stderr)
-            final_output = {
-                "status": "error", "error": "Failed to parse API response",
-                "message": f"APIからの応答をJSONとして解析できませんでした。", "raw_response": answer_text
+            start = time.time()
+            thinking_text, answer_text = await asyncio.to_thread(
+                #_blocking_call_to_gemini, main_call_key, full_contents, query, parallel_count, task_id
+                _blocking_call_to_gemini, loop, api_key_manager, main_call_key, full_contents, query, parallel_count, task_id
+            )
+
+            if thinking_text is None and answer_text is None:
+                return None
+            elapsed = time.time() - start
+
+            # input_tokensの計算　並列実行時は不要
+            if parallel_count <= 1:
+                input_key = await api_key_manager.get_next_key()
+                if input_key:
+                    input_token_response = await asyncio.to_thread(
+                        _blocking_count_tokens, input_key, MODEL_NAME, full_contents
+                    )
+                    if input_token_response: 
+                        input_tokens = input_token_response.total_tokens
+
+            # thinking_tokensの計算　並列実行時は不要
+            if parallel_count <= 1:
+                thinking_key = await api_key_manager.get_next_key()
+                if thinking_text:
+                    if thinking_key:
+                        thinking_token_response = await asyncio.to_thread(
+                            _blocking_count_tokens, thinking_key, MODEL_NAME, thinking_text
+                        )
+                        if thinking_token_response: 
+                            thinking_tokens = thinking_token_response.total_tokens
+
+            # answer_tokensの計算　並列実行時は不要
+            if parallel_count <= 1:
+                answer_key = await api_key_manager.get_next_key()
+                if answer_text:
+                    if answer_key:
+                        answer_token_response = await asyncio.to_thread(
+                            _blocking_count_tokens, answer_key, MODEL_NAME, answer_text
+                        )
+                        if answer_token_response: 
+                            answer_tokens = answer_token_response.total_tokens
+
+            end_time = time.time()
+            time_tokens_info = {
+                "time": round(end_time - start_time, 2),
+                "input_tokens": input_tokens,
+                "thinking_tokens": thinking_tokens,
+                "answer_tokens": answer_tokens,
+                "total_tokens": input_tokens + thinking_tokens + answer_tokens
             }
 
-        final_output["time_tokens"] = time_tokens_info
-        
-        # --- 1件ごとのファイル追記処理 ---
-        query_for_log = query[6:26] + '...' if len(query) > 50 else query
-        async with file_write_lock:
-            all_data = []
-            try:
-                if os.path.exists(output_filename) and os.path.getsize(output_filename) > 0:
-                    with open(output_filename, 'r', encoding='utf-8') as f:
-                        all_data = json.load(f)
-                        if not isinstance(all_data, list): all_data = []
-            except (json.JSONDecodeError, FileNotFoundError): pass
-            
-            all_data.append(final_output)
-            
-            try:
-                with open(output_filename, 'w', encoding='utf-8') as f:
-                    json.dump(all_data, f, indent=2, ensure_ascii=False)
-                print(f"({log_prefix}) 処理完了({elapsed:.2f}s) {output_filename} に追記済 ", file=sys.stderr)
-            except IOError as e:
-                 print(f"エラー ({log_prefix}): ファイル書き込みに失敗: {e}", file=sys.stderr)
+            # 複数のJSONオブジェクトを格納するためのリスト
+            final_outputs = []
+            # AIの応答から、マークダウンのJSONブロックを全て抽出する
+            json_matches = re.findall(r"```json(.*?)```", answer_text, re.DOTALL)
 
-        return final_output
+            if not json_matches:
+                # 1件もJSONブロックが見つからなかった場合
+                #print(f"エラー ({log_prefix}): API応答から有効なJSONブロックを抽出できませんでした。", file=sys.stderr)
+                #print(f"--- 生の応答 ---\n{answer_text}\n----------------", file=sys.stderr)
+                #return None # タスク失敗
+
+                if attempt < MAX_RETRIES - 1:
+                    # 待機時間を指数関数的に増やす (10秒, 20秒, 40秒...)
+                    delay = INITIAL_DELAY * (2 ** attempt)
+                    print(f"\n警告 ({log_prefix}): JSON抽出全部失敗。{delay}秒待機=>再試行... (試行 {attempt + 1}/{MAX_RETRIES})", file=sys.stderr)
+                    time.sleep(delay)
+                    # 次のループでリトライを試みる
+                    continue
+                else:
+                    print(f"\nエラー ({log_prefix}): JSON抽出全部失敗。最大リトライ回数({MAX_RETRIES}回)を超えました。", file=sys.stderr)
+                    # ループを抜けて失敗を返す
+                    return None# タスク失敗
+
+
+            # 抽出した各JSON文字列を個別にパースする
+            for json_str in json_matches:
+                try:
+                    # 文字列をJSONオブジェクトにパース
+                    parsed_json = json.loads(json_str.strip())
+                    # 処理時間などの共通情報を付与
+                    parsed_json["time_tokens"] = time_tokens_info
+                    # 結果リストに追加
+                    final_outputs.append(parsed_json)
+                except json.JSONDecodeError as e:
+                    # パースに失敗したJSONブロックは警告を出してスキップ
+                    print(f"警告 ({log_prefix}): JSONパース一部失敗。スキップします。エラー: {e}", file=sys.stderr)
+                    #print(f"--- パース失敗文字列 ---\n{json_str.strip()}\n--------------------", file=sys.stderr)
+
+
+
+            # JSONパースが入力件数未満ならリトライ
+            if len(final_outputs) < LINES_PER_QUERY:
+                #print(f"エラー ({log_prefix}): 抽出されたJSONブロックはありましたが、全てパースに失敗しました。", file=sys.stderr)
+                #return None
+                if attempt < MAX_RETRIES - 1:
+                    # 待機時間を指数関数的に増やす (10秒, 20秒, 40秒...)
+                    delay = INITIAL_DELAY * (2 ** attempt)
+                    print(f"\n警告 ({log_prefix}): JSON件数不足。{len(final_outputs)}/{LINES_PER_QUERY} {delay}秒待機=>再試行... (試行 {attempt + 1}/{MAX_RETRIES})", file=sys.stderr)
+                    time.sleep(delay)
+                    # 次のループでリトライを試みる
+                    continue
+                else:
+                    print(f"\nエラー ({log_prefix}): JSON件数不足。最大リトライ回数({MAX_RETRIES}回)を超えました。", file=sys.stderr)
+                    # ループを抜けて失敗を返す
+                    return None# タスク失敗
+
+
+            # --- 1件ごとのファイル追記処理 ---
+            async with file_write_lock:
+                all_data = []
+                try:
+                    if os.path.exists(output_filename) and os.path.getsize(output_filename) > 0:
+                        with open(output_filename, 'r', encoding='utf-8') as f:
+                            all_data = json.load(f)
+                            if not isinstance(all_data, list): all_data = []
+                except (json.JSONDecodeError, FileNotFoundError): pass
+                
+                # ★★★ 複数の結果をリストに一括で追加する ★★★
+                all_data.extend(final_outputs)
+                
+                try:
+                    with open(output_filename, 'w', encoding='utf-8') as f:
+                        json.dump(all_data, f, indent=2, ensure_ascii=False)
+                    # ログメッセージを、処理したJSONの件数を表示するように変更
+                    print(f"({log_prefix}) 処理完了({elapsed:.2f}s) {len(final_outputs)}件のJSONを {output_filename} に追記済 ", file=sys.stderr)
+                except IOError as e:
+                    print(f"エラー ({log_prefix}): ファイル書き込みに失敗: {e}", file=sys.stderr)
+
+            return final_outputs
+
+def make_log_dir():
+    # フォルダが存在しないかチェック
+    if not os.path.exists(LOG_DIR):
+        # 存在しない場合のみ、フォルダを作成
+        os.makedirs(LOG_DIR)
+        print(f"フォルダ '{LOG_DIR}' を作成しました。")
+    else:
+        # 既に存在する場合
+        print(f"フォルダ '{LOG_DIR}' は既に存在します。")
 
 async def main():
     parser = argparse.ArgumentParser(description="企業情報を検索し、結果をJSONで出力するアプリ")
@@ -404,18 +584,9 @@ async def main():
     parser.add_argument("--parallel", type=int, default=5, help="最大並列実行数（デフォルト: 5）")
     args = parser.parse_args()
     
-    log_directory = LOG_DIR
+    make_log_dir()
 
-    # フォルダが存在しないかチェック
-    if not os.path.exists(log_directory):
-        # 存在しない場合のみ、フォルダを作成
-        os.makedirs(log_directory)
-        print(f"フォルダ '{log_directory}' を作成しました。")
-    else:
-        # 既に存在する場合
-        print(f"フォルダ '{log_directory}' は既に存在します。")
-    
-    output_filename = f"{log_directory}/output.json"
+    output_filename = f"{LOG_DIR}/output.json"
 
     
     #try:
@@ -431,7 +602,34 @@ async def main():
         print(f"INFO: 並列実行モードで起動します (最大{args.parallel}並列)。", file=sys.stderr)
         try:
             with open(args.prompt_file, 'r', encoding='utf-8') as f:
-                queries = [line.strip() for line in f if line.strip()]
+                # --- ▼▼▼ ここから修正 ▼▼▼ ---
+                
+                # スクリプト冒頭で定義した設定値を参照する
+                if LINES_PER_QUERY < 1:
+                    print(f"エラー: 設定変数 LINES_PER_QUERY ({LINES_PER_QUERY}) は1以上の整数である必要があります。", file=sys.stderr)
+                    sys.exit(1)
+
+                # まず全ての行を読み込み、空行は除外する
+                lines = [line.strip() for line in f if line.strip()]
+                
+                # 行数が LINES_PER_QUERY の倍数でない場合は警告
+                if len(lines) % LINES_PER_QUERY != 0:
+                    extra_lines = len(lines) % LINES_PER_QUERY
+                    print(f"警告: 入力ファイルの行数が {LINES_PER_QUERY} の倍数ではありません。最後の {extra_lines} 行は無視されます。", file=sys.stderr)
+
+                # LINES_PER_QUERY で指定された行数ずつグループ化する
+                queries = []
+                # 作成できるクエリの総数を計算
+                num_queries = len(lines) // LINES_PER_QUERY
+                for i in range(num_queries):
+                    start_index = i * LINES_PER_QUERY
+                    end_index = start_index + LINES_PER_QUERY
+                    # スライスした行のリストを改行で連結
+                    query_block = "\n".join(lines[start_index:end_index])
+                    queries.append(query_block)
+
+                # --- ▲▲▲ ここまで修正 ▲▲▲ ---
+                
             if not queries:
                 print(f"エラー: プロンプトファイル '{args.prompt_file}' が空です。", file=sys.stderr)
                 sys.exit(1)
