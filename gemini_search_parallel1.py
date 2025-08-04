@@ -25,7 +25,7 @@ MODEL_NAME = 'gemini-2.5-flash'
 
 LOG_DIR = "log1"
 
-LINES_PER_QUERY = 3
+LINES_PER_QUERY = 5
 # --- ▼▼▼ この変数を追加 ▼▼▼ ---
 # 1クエリあたりにまとめる行数をここで指定
 # 1 => 1行で1件

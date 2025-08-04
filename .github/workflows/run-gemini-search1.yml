@@ -29,7 +29,7 @@ jobs:
       # 4. スクリプトを実行する
       #    GitHub SecretsからAPIキーを環境変数として渡す
       - name: Run Gemini Search Script
-        run: python gemini_search_parallel1.py --prompt-file input_data1.txt --parallel 15
+        run: python gemini_search_parallel1.py --prompt-file input_data1.txt --parallel 10
         env:
           # GitHub Secretsに登録したキーを環境変数に設定
           # 複数のキーがある場合は、以下のように追加してください
