@@ -51,7 +51,7 @@ def _blocking_call_to_gemini(api_key: str, full_contents: str):
     api_call_start_time = time.time() 
     try:
         stream = client.models.generate_content_stream(
-            model='gemini-2.5-flash',
+            model='gemini-2.5-pro',
             contents=full_contents,
             config=config,
         )
@@ -150,19 +150,51 @@ async def main():
         companies = [c.strip() for c in re.split(r'\s*###\s*|\s*\n\s*', args.query) if c.strip()]
         input_count = len(companies)
 
+
         prompt_template="""
+# 調査対象企業
 - {company_name}
 
-# 上記の複数の企業について、ルールに従い、以下のJSON形式で出力してください。
+# 上記の企業について、ルールに従い、以下のJSON形式で出力してください。
 
-# 厳守すべきルール
-1. *業種を特定する事のみに専念し、他の事は調べないでください。*
-2. *入力された、複数の会社名　住所の情報から、業種を特定してください。*
-3. *入力された、会社の件数を数えてください。*
-4.  **情報の源泉:** あなたの回答は、**必ずGoogle検索で得られた信頼できる情報源（公式サイト、地図情報）
-    **に基づいていなければなりません。プロンプト内の情報は参考程度とし、鵜呑みにしないでください。
-5.  **ファクトチェックの徹底:** 名称と住所を基に、正しい業種を再検証してください。
-6.  **欠損情報の扱い:** 調査しても情報が見つからない場合は、業種の値を `不明` としてください。
+# ルール
+1.  **早期打ち切りルール:** 以下の**主要調査項目**のうち、**3つ以上**の情報が見つからなかった（「null」となった）時点で、それ以上の調査を即座に打ち切り、下記の**「調査中断レポート」**を出力してください。
+    *   **主要調査項目:** `officialUrl`, `companyName`, `tel`, `email`, `contactFormUrl`
+2.  **通常の出力:** 上記ルールに抵触しなかった場合のみ、収集した情報を下記の**「通常調査レポート」**の形式で出力してください。
+3.  **欠損情報の扱い:** 情報が見つからない項目は、`null` としてください。
+
+
+# 出力形式 (JSON)
+### 通常調査レポート
+```json
+{{
+  "status": "success",
+  "data": {{
+    "officialUrl": "公式サイトのURL（string）",
+    "companyName": "企業の正式名称（string）",
+    "email": "代表メールアドレス（string） 調査方法：公式サイトの企業概要、お問合せ、companyinfoなどのページから、<a>タグ、mailto:に含まれていないか調べること。",
+    "contactFormUrl": "発見した問い合わせフォームのURL、またはnull（string）",
+  }}
+}}```
+
+# 調査中断レポート
+```json
+{{
+  "status": "terminated",
+  "error": "Required information could not be found.",
+  "message": "主要調査項目のうち3つ以上が不明だったため、調査を中断しました。",
+  "targetCompany": "{company_name}"
+}}```
+"""
+
+
+        prompt_template1="""
+- {company_name}
+
+# あなたは、入力された複数の会社名　住所の情報から、それぞれの業種を特定するプロフェッショナルです。
+**タスクの分割**: 一度に全てのリストを処理せずに、必要な回数に分割して実行し、最後に全ての情報を統合して出力してください。
+# 上記の複数の企業について、以下のJSON形式で出力してください。
+
 
 
 # 出力形式 (JSON)
@@ -171,12 +203,20 @@ async def main():
 {{
   "status": "success",
   "count": {{input_count}},
-  "data": {{
+  "data": [
+  {{
     "companyName": "企業の正式名称（string）",
     "address": "本社の所在地（string）"
-    "industry": "主要な業種（string）",
-  }}
-}}```
+    "industry": "主要な業種（string）不明の場合は深追いせずに、不明と記載してください。出力前に情報が正しいか再度確認してください。",
+  }},
+  {{
+    "companyName": "企業の正式名称（string）",
+    "address": "本社の所在地（string）"
+    "industry": "主要な業種（string）不明の場合は深追いせずに、不明と記載してください。出力前に情報が正しいか再度確認してください。",
+  }},
+  ]
+}}
+```
 """
 
         prompt_template2="""
@@ -281,6 +321,7 @@ async def main():
         )
         if input_token_response:
             input_tokens = input_token_response.total_tokens
+    await asyncio.sleep(2)
 
     # 2. Geminiへのメイン処理
     main_call_key = await api_key_manager.get_next_key()
@@ -294,6 +335,7 @@ async def main():
     thinking_text, answer_text = await asyncio.to_thread(
         _blocking_call_to_gemini, main_call_key, full_contents
     )
+    await asyncio.sleep(2)
 
     # thinking_text と answer_text がNoneの場合、API呼び出しでエラーが起きている
     if thinking_text is None and answer_text is None:
@@ -311,6 +353,7 @@ async def main():
             )
             if thinking_token_response:
                 thinking_tokens = thinking_token_response.total_tokens
+    await asyncio.sleep(2)
 
     if answer_text:
         answer_key = await api_key_manager.get_next_key()
@@ -322,6 +365,7 @@ async def main():
             )
             if answer_token_response:
                 answer_tokens = answer_token_response.total_tokens
+    await asyncio.sleep(2)
 
     print("\n------------------------------")
     end_time = time.time()

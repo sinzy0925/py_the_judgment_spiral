@@ -10,6 +10,7 @@ import asyncio
 import subprocess
 import logging # <<< 変更点: loggingモジュールをインポート
 from datetime import datetime # <<< 変更点: datetimeモジュールをインポート
+import time
 
 # google.genaiのインポート
 try:
@@ -39,7 +40,7 @@ def setup_logger(company_name: str):
     # ファイル名に使えない文字を置換
     safe_company_name = re.sub(r'[\\|/|:|*|?|"|<|>|\|]', '_', company_name)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file_name = f"{safe_company_name[:50]}_{timestamp}.log"
+    log_file_name = f"{timestamp}_{safe_company_name[:50]}.log"
     log_file_path = os.path.join(log_dir, log_file_name)
 
     # 2. ロガーの取得とレベル設定
@@ -67,10 +68,12 @@ def setup_logger(company_name: str):
 
     # 7. print関数をロガーのinfoメソッドで上書き（モンキーパッチ）
     #    これにより、既存のprint文はすべてロガー経由で出力されるようになる
-    builtins = __import__('builtins')
-    builtins.print = logger.info
+    #builtins = __import__('builtins')
+    #builtins.print = logger.info
     
-    print(f"--- ログ出力開始: {log_file_path} ---")
+    #print(f"--- ログ出力開始: {log_file_path} ---")
+    # ログに出力したい場合は、明示的に logger.info を使う
+    logging.info(f"--- ログ出力開始: {log_file_path} ---")
 
 # --- PROMPT DEFINITIONS ---
 def create_initial_evaluation_prompt(log_output: str, company_name: str) -> str:
@@ -81,7 +84,7 @@ def create_initial_evaluation_prompt(log_output: str, company_name: str) -> str:
 ### 最高のプロンプトを設計するための原理原則（Google AIドキュメントより抜粋）
 
 0.  **早期打ち切りルール:**
-    *   具体的に何という項目が、何件取得できなければ早期打ち切りにするか決めてください。
+    *   ユーザーが必要としている内容は複数です。なので、１件の情報に対して、どれくらいの時間をかけるかを決めてください。
     *   早期打ち切りにする場合は、理由がわかるように提示してください。
     *   一度調べて、分からなければその時点で、「不明」と答えて良い。
 
@@ -124,6 +127,38 @@ def create_initial_evaluation_prompt(log_output: str, company_name: str) -> str:
 """
     
     return f"""
+以下の評価対象の実行ログを元に、改善が見込めると確信があれば、プロンプトを修正してください。確信がなければ、前回と全く同じプロンプトを出力してください。
+
+--- 評価対象の実行ログ ---
+{log_output}
+--- ここまで ---
+
+--- 出力必須のJSONスキーマ ---
+```json
+{{
+  "evaluationResult": {{
+    "targetCompany": "ログから抽出した調査対象企業名",
+    "overallScore": "100点満点での総合評価",
+    "overallSummary": "評価全体の総括コメント",
+    "detailedCriteria": [
+      {{"criterion": "プロンプト指示への忠実性", "score": "25/25", "analysis": "..."}},
+      {{"criterion": "情報の正確性（ファクトチェック）", "score": "25/25", "analysis": "..."}},
+      {{"criterion": "高度な推論・分析能力", "score": "25/25", "analysis": "..."}},
+      {{"criterion": "網羅性と例外処理", "score": "25/25", "analysis": "..."}}
+    ]
+  }},
+  "performanceMetrics": {{
+    "executionTimeSeconds": "ログから抽出した総実行時間（float）",
+    "tokens": {{"input": "int", "output": "int", "total": "int"}},
+    "analysis": "速度とコストの観点からのパフォーマンス分析"
+  }},
+  "suggestedPrompt": "（ここに、あなたが生成した改善版の完全なプロンプト文字列を記述してください。プレースホルダーは含めないでください。）"
+}}```
+"""
+
+
+
+    return1= f"""
 あなたは、AIのパフォーマンスを多角的に分析し、改善策を提案する、世界トップクラスのプロンプトエンジニアです。
 あなたは、以下の【最高のプロンプトを設計するための原理原則】を深く理解しています。
 
@@ -260,22 +295,27 @@ async def call_gemini(prompt: str) -> dict:
 
         if json_string:
             try:
-                return json.loads(json_string)
+                # <<< 修正点：JSONをパースする前に、文字列内の不正な改行を置換する >>>
+                # re.subを使って、キー: "値" の値部分に含まれる改行文字(\n)を、
+                # JSONとして有効なエスケープシーケンス(\\n)に置換する。
+                # (?<!\\) は「直前にバックスラッシュがない」ことを確認するネガティブ後読みアサーション。
+                # これにより、既に正しくエスケープされている \\n を \\\\n に変えてしまうのを防ぐ。
+                json_string = json_string.strip()
+                corrected_json_string = re.sub(r'(?<!\\)\n', r'\\n', json_string)
+
+                return json.loads(corrected_json_string) # <<< 修正した文字列をパースする
+                
             except json.JSONDecodeError as e:
                 print("\n--- JSONパースエラー ---")
                 print(f"エラー詳細: {e}")
-                print("パースに失敗した抽出済み文字列:", json_string)
+                # <<< デバッグ用に修正前の文字列と修正後の文字列の両方を出力 >>>
+                print("パースに失敗した抽出済み文字列（修正前）:", json_string)
+                if 'corrected_json_string' in locals():
+                    print("パースに失敗した抽出済み文字列（修正後）:", corrected_json_string)
                 print("--- AIからの生のレスポンス全体 ---")
                 print(raw_text)
                 print("------------------------------\n")
                 raise
-        else:
-            print("\n--- JSON抽出エラー ---")
-            print("AIのレスポンスからJSONオブジェクトを抽出できませんでした。")
-            print("--- AIからの生のレスポンス全体 ---")
-            print(raw_text)
-            print("------------------------------\n")
-            raise ValueError("AI response did not contain a valid JSON object.")
 
     return await asyncio.to_thread(generate, api_key)
 
@@ -301,6 +341,7 @@ async def main():
         initial_log = await run_search_app(company_name)
         print(f"log: \n{initial_log}")
         print("初回実行完了。")
+        await asyncio.sleep(2) # <<< 変更点: time.sleep(2) 
 
         # 2. 初回評価＆改善案プロンプト生成
         print("\n--- [ステップ2/6] 初回ログを評価し、改善版プロンプトを生成中... ---")
@@ -317,6 +358,7 @@ async def main():
             return
 
         print("改善版プロンプトの生成完了。")
+        await asyncio.sleep(2)
 
         # 3. 改善版プロンプトを一時ファイルに保存
         print(f"\n--- [ステップ3/6] 改善版プロンプトを一時ファイルに保存します ---")
@@ -325,12 +367,14 @@ async def main():
             tf.write(suggested_prompt)
         
         print(f"改善版プロンプトを '{os.path.basename(temp_prompt_file)}' に保存しました。")
-
+        await asyncio.sleep(2)
+        
         # 4. 改善後プロンプトで再実行
         print("\n--- [ステップ4/6] 改善版プロンプトで再実行中... ---")
         improved_log = await run_search_app(company_name, prompt_file=temp_prompt_file)
         print(f"log: \n{improved_log}")
         print("再実行完了。")
+        await asyncio.sleep(2)
 
         # 5. 2回目の評価
         print("\n--- [ステップ5/6] 2回目のログを評価中... ---")
@@ -339,7 +383,8 @@ async def main():
         print(f"log: \n{improved_eval_prompt}")
         print(f"log: \n{improved_eval_result}")
         print("2回目の評価完了。")
-
+        await asyncio.sleep(2)
+        
         # 6. 最終比較
         print("\n--- [ステップ6/6] 最終比較レポートを生成中... ---")
         comparison_prompt = create_comparison_prompt(

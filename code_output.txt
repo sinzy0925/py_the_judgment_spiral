@@ -1,4 +1,5 @@
-
+README.mdが正しいかどうか怪しい
+この中にあるアプリを使って、会社のURL、会社名、会社のメールアドレスなければメールフォームを取得したい
 
 
 ---
@@ -7,7 +8,7 @@
 - フォルダ名: .
 - ファイル名: .session_data.json
 - 内容:
-{"lastKeyIndex": 8}
+{"lastKeyIndex": 16}
 
 
 ---
@@ -28,6 +29,7 @@ import asyncio
 import subprocess
 import logging # <<< 変更点: loggingモジュールをインポート
 from datetime import datetime # <<< 変更点: datetimeモジュールをインポート
+import time
 
 # google.genaiのインポート
 try:
@@ -57,7 +59,7 @@ def setup_logger(company_name: str):
     # ファイル名に使えない文字を置換
     safe_company_name = re.sub(r'[\\|/|:|*|?|"|<|>|\|]', '_', company_name)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file_name = f"{safe_company_name[:50]}_{timestamp}.log"
+    log_file_name = f"{timestamp}_{safe_company_name[:50]}.log"
     log_file_path = os.path.join(log_dir, log_file_name)
 
     # 2. ロガーの取得とレベル設定
@@ -85,10 +87,12 @@ def setup_logger(company_name: str):
 
     # 7. print関数をロガーのinfoメソッドで上書き（モンキーパッチ）
     #    これにより、既存のprint文はすべてロガー経由で出力されるようになる
-    builtins = __import__('builtins')
-    builtins.print = logger.info
+    #builtins = __import__('builtins')
+    #builtins.print = logger.info
     
-    print(f"--- ログ出力開始: {log_file_path} ---")
+    #print(f"--- ログ出力開始: {log_file_path} ---")
+    # ログに出力したい場合は、明示的に logger.info を使う
+    logging.info(f"--- ログ出力開始: {log_file_path} ---")
 
 # --- PROMPT DEFINITIONS ---
 def create_initial_evaluation_prompt(log_output: str, company_name: str) -> str:
@@ -99,7 +103,7 @@ def create_initial_evaluation_prompt(log_output: str, company_name: str) -> str:
 ### 最高のプロンプトを設計するための原理原則（Google AIドキュメントより抜粋）
 
 0.  **早期打ち切りルール:**
-    *   具体的に何という項目が、何件取得できなければ早期打ち切りにするか決めてください。
+    *   ユーザーが必要としている内容は複数です。なので、１件の情報に対して、どれくらいの時間をかけるかを決めてください。
     *   早期打ち切りにする場合は、理由がわかるように提示してください。
     *   一度調べて、分からなければその時点で、「不明」と答えて良い。
 
@@ -142,6 +146,38 @@ def create_initial_evaluation_prompt(log_output: str, company_name: str) -> str:
 """
     
     return f"""
+以下の評価対象の実行ログを元に、改善が見込めると確信があれば、プロンプトを修正してください。確信がなければ、前回と全く同じプロンプトを出力してください。
+
+--- 評価対象の実行ログ ---
+{log_output}
+--- ここまで ---
+
+--- 出力必須のJSONスキーマ ---
+```json
+{{
+  "evaluationResult": {{
+    "targetCompany": "ログから抽出した調査対象企業名",
+    "overallScore": "100点満点での総合評価",
+    "overallSummary": "評価全体の総括コメント",
+    "detailedCriteria": [
+      {{"criterion": "プロンプト指示への忠実性", "score": "25/25", "analysis": "..."}},
+      {{"criterion": "情報の正確性（ファクトチェック）", "score": "25/25", "analysis": "..."}},
+      {{"criterion": "高度な推論・分析能力", "score": "25/25", "analysis": "..."}},
+      {{"criterion": "網羅性と例外処理", "score": "25/25", "analysis": "..."}}
+    ]
+  }},
+  "performanceMetrics": {{
+    "executionTimeSeconds": "ログから抽出した総実行時間（float）",
+    "tokens": {{"input": "int", "output": "int", "total": "int"}},
+    "analysis": "速度とコストの観点からのパフォーマンス分析"
+  }},
+  "suggestedPrompt": "（ここに、あなたが生成した改善版の完全なプロンプト文字列を記述してください。プレースホルダーは含めないでください。）"
+}}```
+"""
+
+
+
+    return1= f"""
 あなたは、AIのパフォーマンスを多角的に分析し、改善策を提案する、世界トップクラスのプロンプトエンジニアです。
 あなたは、以下の【最高のプロンプトを設計するための原理原則】を深く理解しています。
 
@@ -278,22 +314,27 @@ async def call_gemini(prompt: str) -> dict:
 
         if json_string:
             try:
-                return json.loads(json_string)
+                # <<< 修正点：JSONをパースする前に、文字列内の不正な改行を置換する >>>
+                # re.subを使って、キー: "値" の値部分に含まれる改行文字(\n)を、
+                # JSONとして有効なエスケープシーケンス(\\n)に置換する。
+                # (?<!\\) は「直前にバックスラッシュがない」ことを確認するネガティブ後読みアサーション。
+                # これにより、既に正しくエスケープされている \\n を \\\\n に変えてしまうのを防ぐ。
+                json_string = json_string.strip()
+                corrected_json_string = re.sub(r'(?<!\\)\n', r'\\n', json_string)
+
+                return json.loads(corrected_json_string) # <<< 修正した文字列をパースする
+                
             except json.JSONDecodeError as e:
                 print("\n--- JSONパースエラー ---")
                 print(f"エラー詳細: {e}")
-                print("パースに失敗した抽出済み文字列:", json_string)
+                # <<< デバッグ用に修正前の文字列と修正後の文字列の両方を出力 >>>
+                print("パースに失敗した抽出済み文字列（修正前）:", json_string)
+                if 'corrected_json_string' in locals():
+                    print("パースに失敗した抽出済み文字列（修正後）:", corrected_json_string)
                 print("--- AIからの生のレスポンス全体 ---")
                 print(raw_text)
                 print("------------------------------\n")
                 raise
-        else:
-            print("\n--- JSON抽出エラー ---")
-            print("AIのレスポンスからJSONオブジェクトを抽出できませんでした。")
-            print("--- AIからの生のレスポンス全体 ---")
-            print(raw_text)
-            print("------------------------------\n")
-            raise ValueError("AI response did not contain a valid JSON object.")
 
     return await asyncio.to_thread(generate, api_key)
 
@@ -319,6 +360,7 @@ async def main():
         initial_log = await run_search_app(company_name)
         print(f"log: \n{initial_log}")
         print("初回実行完了。")
+        await asyncio.sleep(2) # <<< 変更点: time.sleep(2) 
 
         # 2. 初回評価＆改善案プロンプト生成
         print("\n--- [ステップ2/6] 初回ログを評価し、改善版プロンプトを生成中... ---")
@@ -335,6 +377,7 @@ async def main():
             return
 
         print("改善版プロンプトの生成完了。")
+        await asyncio.sleep(2)
 
         # 3. 改善版プロンプトを一時ファイルに保存
         print(f"\n--- [ステップ3/6] 改善版プロンプトを一時ファイルに保存します ---")
@@ -343,12 +386,14 @@ async def main():
             tf.write(suggested_prompt)
         
         print(f"改善版プロンプトを '{os.path.basename(temp_prompt_file)}' に保存しました。")
-
+        await asyncio.sleep(2)
+        
         # 4. 改善後プロンプトで再実行
         print("\n--- [ステップ4/6] 改善版プロンプトで再実行中... ---")
         improved_log = await run_search_app(company_name, prompt_file=temp_prompt_file)
         print(f"log: \n{improved_log}")
         print("再実行完了。")
+        await asyncio.sleep(2)
 
         # 5. 2回目の評価
         print("\n--- [ステップ5/6] 2回目のログを評価中... ---")
@@ -357,7 +402,8 @@ async def main():
         print(f"log: \n{improved_eval_prompt}")
         print(f"log: \n{improved_eval_result}")
         print("2回目の評価完了。")
-
+        await asyncio.sleep(2)
+        
         # 6. 最終比較
         print("\n--- [ステップ6/6] 最終比較レポートを生成中... ---")
         comparison_prompt = create_comparison_prompt(
@@ -562,6 +608,163 @@ api_key_manager = ApiKeyManager()
 - ファイル名: api_key_session.json
 - 内容:
 {"current_index": 11}
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: batch_runner.py
+- 内容:
+import asyncio
+import json
+import sys
+import os
+import re
+import subprocess
+from typing import List, Dict, Any
+
+# --- 設定項目 ---
+try:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    BASE_DIR = os.getcwd()
+
+TARGET_SCRIPT = os.path.join(BASE_DIR, "gemini_search_app_new_sdk.py")
+INPUT_FILE = os.path.join(BASE_DIR, "input_data_sumple.txt")
+OUTPUT_FILE = os.path.join(BASE_DIR, "results.json")
+
+BATCH_SIZE = 10
+MAX_CONCURRENT_TASKS = 10
+
+def sync_run_gemini_batch(batch_id: int, batch_data: List[str]) -> List[Dict[str, Any]] | None:
+    print(f"[SYNC-RUNNER {batch_id}] 同期処理関数を開始します。")
+    
+    try:
+        query_content = "\n".join(batch_data)
+        command = [sys.executable, TARGET_SCRIPT]
+        
+        print(f"[SYNC-RUNNER {batch_id}] サブプロセスを呼び出します...")
+
+        # <<< 文字化け対策の最重要変更点 >>>
+        # サブプロセスに渡す環境変数をコピーし、PYTHONIOENCODINGをutf-8に設定
+        process_env = os.environ.copy()
+        process_env["PYTHONIOENCODING"] = "utf-8"
+        
+        result = subprocess.run(
+            command,
+            input=query_content,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='ignore',
+            env=process_env  # <<< 変更点: 環境変数を渡す
+        )
+
+        print(f"[SYNC-RUNNER {batch_id}] サブプロセス完了。リターンコード: {result.returncode}")
+
+        if result.returncode != 0:
+            print(f"[SYNC-RUNNER {batch_id}] エラー終了を検出。", file=sys.stderr)
+            if result.stderr:
+                print(f"--- [SYNC-RUNNER {batch_id}] のエラー出力 ---\n{result.stderr}\n---------------------------------", file=sys.stderr)
+            return None
+
+        output_str = result.stdout
+        print(f"[SYNC-RUNNER {batch_id}] 正常終了。出力解析開始。")
+        
+        try:
+            match = re.search(r"```json\s*([\s\S]*?)\s*```", output_str, re.DOTALL)
+            if not match:
+                raise ValueError("出力から '```json' で囲まれたブロックが見つかりません。")
+
+            json_str = match.group(1)
+            
+            # <<< JSON解析の堅牢化 >>>
+            result_json = json.loads(json_str, strict=False)
+            
+            if result_json.get("status") == "success" and "data" in result_json:
+                data_list = result_json["data"]
+                if isinstance(data_list, list):
+                    print(f"[SYNC-RUNNER {batch_id}] 正常なデータ {len(data_list)}件 を取得しました。")
+                    return data_list
+                else:
+                    raise TypeError("レスポンスの'data'フィールドがリストではありません。")
+            else:
+                error_msg = result_json.get("message", "不明なレスポンスエラー")
+                raise ValueError(f"レスポンスにエラーが含まれます: {error_msg}")
+
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            print(f"[SYNC-RUNNER {batch_id}] エラー: 出力解析に失敗。詳細: {e}", file=sys.stderr)
+            print(f"--- [SYNC-RUNNER {batch_id}] の標準出力（先頭1000文字） ---\n{output_str[:1000]}\n---------------------------------", file=sys.stderr)
+            return None
+    
+    except Exception as e:
+        print(f"[SYNC-RUNNER {batch_id}] 予期せぬ致命的エラー: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return None
+
+async def run_batch_in_executor(semaphore: asyncio.Semaphore, loop: asyncio.AbstractEventLoop, batch_id: int, batch_data: List[str]):
+    async with semaphore:
+        print(f"[ASYNC-WRAPPER {batch_id}] セマフォ取得。スレッドプールで同期関数を実行...")
+        result = await loop.run_in_executor(
+            None, sync_run_gemini_batch, batch_id, batch_data
+        )
+        print(f"[ASYNC-WRAPPER {batch_id}] スレッドプール処理完了。")
+        return result
+
+async def main_orchestrator():
+    print("--- 企業情報一括調査アプリケーション開始 ---")
+    
+    if not os.path.exists(TARGET_SCRIPT) or not os.path.exists(INPUT_FILE):
+        print("致命的エラー: 必須ファイルが見つかりません。", file=sys.stderr)
+        sys.exit(1)
+
+    with open(INPUT_FILE, 'r', encoding='utf-8') as f:
+        lines = [line.strip() for line in f if line.strip()]
+    
+    if not lines:
+        print("入力ファイルが空です。")
+        return
+
+    total_lines = len(lines)
+    num_batches = (total_lines + BATCH_SIZE - 1) // BATCH_SIZE
+    print(f"合計 {total_lines} 件のデータを読み込み、{BATCH_SIZE}件ずつの {num_batches} バッチを作成。")
+
+    batches = [lines[i:i + BATCH_SIZE] for i in range(0, total_lines, BATCH_SIZE)]
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+    loop = asyncio.get_running_loop()
+    tasks = [asyncio.create_task(run_batch_in_executor(semaphore, loop, i + 1, batch)) for i, batch in enumerate(batches)]
+    
+    print(f"\n最大{MAX_CONCURRENT_TASKS}件の並列処理を開始します...")
+    batch_results = await asyncio.gather(*tasks)
+
+    print("\n--- 全バッチ処理完了。結果を統合しています... ---")
+    final_data = [item for result in batch_results if result for item in result]
+    success_count = sum(1 for r in batch_results if r is not None)
+    failed_count = len(batches) - success_count
+
+    print(f"処理結果: 成功 {success_count}バッチ / 失敗 {failed_count}バッチ")
+    print(f"合計 {len(final_data)} 件の企業データを正常に取得。")
+    
+    if final_data:
+        with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
+            json.dump(final_data, f, ensure_ascii=False, indent=2)
+        print(f"結果を '{OUTPUT_FILE}' に保存しました。")
+    else:
+        print("正常に取得できたデータがなかったため、出力ファイルは作成されませんでした。")
+    
+    print("\n--- アプリケーション終了 ---")
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main_orchestrator())
+    except KeyboardInterrupt:
+        print("\nプログラムが中断されました。")
+    except Exception as e:
+        print(f"予期せぬ致命的なエラー: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
 
 
 ---
@@ -3777,19 +3980,59 @@ async def main():
         companies = [c.strip() for c in re.split(r'\s*###\s*|\s*\n\s*', args.query) if c.strip()]
         input_count = len(companies)
 
+
         prompt_template="""
+# 調査対象企業
 - {company_name}
 
-# 上記の複数の企業について、ルールに従い、以下のJSON形式で出力してください。
+# 上記の企業について、ルールに従い、以下のJSON形式で出力してください。
 
-# 厳守すべきルール
-1. *業種を特定する事のみに専念し、他の事は調べないでください。*
-2. *入力された、複数の会社名　住所の情報から、業種を特定してください。*
-3. *入力された、会社の件数を数えてください。*
-4.  **情報の源泉:** あなたの回答は、**必ずGoogle検索で得られた信頼できる情報源（公式サイト、地図情報）
-    **に基づいていなければなりません。プロンプト内の情報は参考程度とし、鵜呑みにしないでください。
-5.  **ファクトチェックの徹底:** 名称と住所を基に、正しい業種を再検証してください。
-6.  **欠損情報の扱い:** 調査しても情報が見つからない場合は、業種の値を `不明` としてください。
+# ルール
+1.  **早期打ち切りルール:** 以下の**主要調査項目**のうち、**3つ以上**の情報が見つからなかった（「null」となった）時点で、それ以上の調査を即座に打ち切り、下記の**「調査中断レポート」**を出力してください。
+    *   **主要調査項目:** `officialUrl`, `industry`, `tel`, `fax`, `businessSummary`
+2.  **通常の出力:** 上記ルールに抵触しなかった場合のみ、収集した情報を下記の**「通常調査レポート」**の形式で出力してください。
+3.  **欠損情報の扱い:** 情報が見つからない項目は、`null` としてください。
+
+
+# 出力形式 (JSON)
+### 通常調査レポート
+```json
+{{
+  "status": "success",
+  "data": {{
+    "companyName": "企業の正式名称（string）",
+    "companyStatus": "企業の現在の状況（例：活動中, 閉鎖, 情報なし）（string）",
+    "officialUrl": "公式サイトのURL（string）",
+    "address": "本社の所在地（string）",
+    "industry": "主要な業界（string）",
+    "email": "代表メールアドレス（string） 調査方法：公式サイトの企業概要、お問合せ、companyinfoなどのページから、<a>タグ、mailto:に含まれていないか調べること。",
+    "tel": "代表電話番号（string）",
+    "fax": "代表FAX番号（string）",
+    "capital": "資本金（string）",
+    "founded": "設立年月（string）",
+    "businessSummary": "事業内容の簡潔な要約（string）",
+    "strengths": "企業の強みや特徴（string）"
+  }}
+}}```
+
+# 調査中断レポート
+```json
+{{
+  "status": "terminated",
+  "error": "Required information could not be found.",
+  "message": "主要調査項目のうち3つ以上が不明だったため、調査を中断しました。",
+  "targetCompany": "{company_name}"
+}}```
+"""
+
+
+        prompt_template1="""
+- {company_name}
+
+# あなたは、入力された複数の会社名　住所の情報から、それぞれの業種を特定するプロフェッショナルです。
+**タスクの分割**: 一度に全てのリストを処理せずに、必要な回数に分割して実行し、最後に全ての情報を統合して出力してください。
+# 上記の複数の企業について、以下のJSON形式で出力してください。
+
 
 
 # 出力形式 (JSON)
@@ -3798,12 +4041,20 @@ async def main():
 {{
   "status": "success",
   "count": {{input_count}},
-  "data": {{
+  "data": [
+  {{
     "companyName": "企業の正式名称（string）",
     "address": "本社の所在地（string）"
-    "industry": "主要な業種（string）",
-  }}
-}}```
+    "industry": "主要な業種（string）不明の場合は深追いせずに、不明と記載してください。出力前に情報が正しいか再度確認してください。",
+  }},
+  {{
+    "companyName": "企業の正式名称（string）",
+    "address": "本社の所在地（string）"
+    "industry": "主要な業種（string）不明の場合は深追いせずに、不明と記載してください。出力前に情報が正しいか再度確認してください。",
+  }},
+  ]
+}}
+```
 """
 
         prompt_template2="""
@@ -3908,6 +4159,7 @@ async def main():
         )
         if input_token_response:
             input_tokens = input_token_response.total_tokens
+    await asyncio.sleep(2)
 
     # 2. Geminiへのメイン処理
     main_call_key = await api_key_manager.get_next_key()
@@ -3921,6 +4173,7 @@ async def main():
     thinking_text, answer_text = await asyncio.to_thread(
         _blocking_call_to_gemini, main_call_key, full_contents
     )
+    await asyncio.sleep(2)
 
     # thinking_text と answer_text がNoneの場合、API呼び出しでエラーが起きている
     if thinking_text is None and answer_text is None:
@@ -3938,6 +4191,7 @@ async def main():
             )
             if thinking_token_response:
                 thinking_tokens = thinking_token_response.total_tokens
+    await asyncio.sleep(2)
 
     if answer_text:
         answer_key = await api_key_manager.get_next_key()
@@ -3949,6 +4203,7 @@ async def main():
             )
             if answer_token_response:
                 answer_tokens = answer_token_response.total_tokens
+    await asyncio.sleep(2)
 
     print("\n------------------------------")
     end_time = time.time()
@@ -4350,6 +4605,157 @@ if __name__ == "__main__":
 
 
 - フォルダ名: .
+- ファイル名: gemini_search_app_new_sdk_.py
+- 内容:
+import os
+import sys
+import time
+import asyncio
+from google import genai
+from google.genai import types
+from dotenv import load_dotenv
+import json
+import re
+
+from api_key_manager import api_key_manager
+
+load_dotenv()
+
+def _blocking_call_to_gemini(api_key: str, full_contents: str):
+    if not api_key:
+        print("\nエラー: _blocking_call_to_gemini に有効なAPIキーが渡されませんでした。", file=sys.stderr)
+        return None, None
+    try:
+        client = genai.Client(api_key=api_key)
+    except Exception as e:
+        print(f"\nエラー: APIクライアントの初期化に失敗しました: {e}", file=sys.stderr)
+        return None, None
+        
+    config = types.GenerateContentConfig(
+        tools=[types.Tool(google_search=types.GoogleSearch())]
+    )
+
+    print(f"'{full_contents.splitlines()[0]}' で始まるプロンプトについて、AIが処理を開始します...", file=sys.stderr)
+    
+    api_call_start_time = time.time()
+    try:
+        stream = client.models.generate_content_stream(
+            model='gemini-2.5-flash',
+            contents=full_contents,
+            config=config,
+        )
+    except Exception as e:
+        print(f"\nAPI呼び出し中にエラーが発生しました: {e}", file=sys.stderr)
+        return None, None
+    
+    answer_text = ""
+    print("\n--- AIの回答ストリーム受信中 ---", file=sys.stderr)
+    try:
+        for chunk in stream:
+            if not chunk.candidates: continue
+            for part in chunk.candidates[0].content.parts:
+                if hasattr(part, 'text') and part.text:
+                    answer_text += part.text
+        
+        print(answer_text, end="")
+        print(f"\n[{time.time() - api_call_start_time:.2f}s] 全ストリーム受信完了。", file=sys.stderr)
+        return "Thinking process is currently disabled.", answer_text
+    
+    except Exception as e:
+        print(f"\nストリームの処理中に予期せぬエラーが発生しました: {e}", file=sys.stderr)
+        return None, None
+
+async def main():
+    start_time = time.time()
+    
+    if sys.stdin.isatty():
+        print("エラー: このスクリプトはパイプまたはリダイレクトで入力を受け取る必要があります。", file=sys.stderr)
+        sys.exit(1)
+    
+    query_from_stdin = sys.stdin.read().strip()
+
+    if not query_from_stdin:
+        print("エラー: 入力が空です。", file=sys.stderr)
+        sys.exit(1)
+
+    companies = [c.strip() for c in re.split(r'\s*###\s*|\s*\n\s*', query_from_stdin) if c.strip()]
+    input_count = len(companies)
+
+    # <<< プロンプトの改善 >>>
+    prompt_template="""
+# 指示
+あなたは、入力された複数の会社名と住所の情報から、それぞれの業種を特定するプロフェッショナルです。
+入力された全ての企業について、Google検索ツールを駆使して調査し、結果を**必ず指定されたJSON形式で厳密に出力**してください。
+
+# 調査対象企業リスト
+{company_list}
+
+# 出力に関する厳格なルール
+1.  **出力は必ず ` ```json ` で始まり、 ` ``` ` で終わるマークダウンのJSONコードブロックの中に記述してください。**
+2.  JSONの文字列値にバックスラッシュ(`\`)やその他のエスケープが必要な文字を含めないでください。
+3.  不明な項目は、無理に情報を探さず、正直に「不明」と記載してください。
+
+# 出力形式 (JSON)
+```json
+{{
+  "status": "success",
+  "count": {input_count},
+  "data": [
+    {{
+      "companyName": "企業の正式名称（string）",
+      "address": "本社の所在地（string）",
+      "industry": "主要な業種（string）"
+    }}
+  ]
+}}```
+"""
+    full_contents = prompt_template.format(
+        company_list=query_from_stdin,
+        input_count=input_count
+    )
+
+    print(f"プロンプトを生成しました。文字数: {len(full_contents)}", file=sys.stderr)
+
+    main_call_key = await api_key_manager.get_next_key()
+    if not main_call_key:
+        print("エラー: メイン処理用のAPIキーを取得できませんでした。", file=sys.stderr)
+        sys.exit(1)
+        
+    key_info = api_key_manager.last_used_key_info 
+    print(f"[INFO] メイン処理用にキー (index: {key_info['index']}, ...{key_info['key_snippet']}) を取得。", file=sys.stderr)
+
+    thinking_text, answer_text = await asyncio.to_thread(
+        _blocking_call_to_gemini, main_call_key, full_contents
+    )
+
+    if thinking_text is None and answer_text is None:
+        print("エラー: Geminiからの応答取得に失敗しました。処理を中断します。", file=sys.stderr)
+        sys.exit(1)
+
+    print("\n------------------------------", file=sys.stderr)
+    end_time = time.time()
+    print(f"総実行時間: {end_time - start_time:.2f}秒", file=sys.stderr)
+
+if __name__ == "__main__":
+    exit_code = 0
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nプログラムが中断されました。", file=sys.stderr)
+        exit_code = 130
+    except Exception as e:
+        print(f"予期せぬ致命的なエラーが発生しました: {e}", file=sys.stderr)
+        exit_code = 1
+    finally:
+        api_key_manager.save_session()
+        print("[INFO] アプリケーション終了に伴いセッションを保存しました。", file=sys.stderr)
+        sys.exit(exit_code)
+
+
+---
+
+
+- フォルダ名: .
 - ファイル名: gemini_zukai.md
 - 内容:
 
@@ -4430,3 +4836,818 @@ graph LR
     linkStyle 1,3,5,7,8,10 stroke:#A0A0A0,stroke-width:1.5px,color:black
 
 ```
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: input_data_sumple.txt
+- 内容:
+### 1. 	ダイレックス・ジャパン株式会社  大阪府大阪市西区新町１丁目２４番８号ノース四ツ橋ビル８Ｆ
+### 2. 	原町製袋株式会社  大阪府大阪市中央区久太郎町４丁目１番３号
+### 3. 	新日本サーマルセラミックス株式会社  大阪府堺市堺区戎島町４丁４５番地１ポルタスセンタービル１２階
+### 4. 	株式会社エコクリエイト大阪  大阪府大阪市此花区北港白津２丁目４番１３号
+### 5. 	株式会社Ｗａｃｈｙ  大阪府大阪市福島区福島１丁目１番４８－２５０３号
+### 6. 	株式会社ＧＩＰ  大阪府大阪市中央区南船場２丁目５番１９号３階
+### 7. 	株式会社グランドプロモーション  大阪府大阪市中央区南本町３丁目２番９号
+### 8. 	株式会社太閤印刷  大阪府大阪市城東区中央２丁目１４番Ｃ－１１０８号
+### 9. 	株式会社ドリームダイニング  大阪府大阪市天王寺区味原町１３番９号
+### 10. 	株式会社クレッセント  大阪府堺市南区宮山台３丁１１番５号
+### 11. 	株式会社ＳＮＯＰＥＳ  大阪府高石市千代田２丁目１５番５号
+### 12. 	ＭＩＴＡＳＵ株式会社  大阪府大阪市西区江戸堀２丁目１番１号江戸堀センタービル９階
+### 13. 	エーピーアイコンサルタンツ株式会社  大阪府大阪市淀川区宮原１丁目１３番５号
+### 14. 	リゾート・コミュニケーション株式会社  大阪府大阪市此花区北港緑地２丁目２番９８号
+### 15. 	インテグラル株式会社  大阪府大阪市中央区高津１丁目３－８－１１０７
+### 16. 	ＡＯＩ　ＣＲＥＡＴＩＶＥ　ＭＡＮＡＧＥＭＥＮＴ株式会社  大阪府大阪市此花区西九条１丁目３番３７号
+### 17. 	ＳＩＫＩ株式会社  大阪府大阪市浪速区稲荷１丁目７番２号３Ｆ
+### 18. 	株式会社コミス  大阪府大阪市平野区加美北１丁目１６－１４－２階
+### 19. 	株式会社アイテック  大阪府吹田市南吹田５丁目２６番２８号
+### 20. 	株式会社ＳＫホールディングス  大阪府和泉市和気町２丁目３番１号
+### 21. 	株式会社ドレスアンドコー  大阪府大阪市浪速区湊町１丁目２番３号マルイト難波ビル１１階
+### 22. 	ハックベンチャーズ株式会社  大阪府大阪市北区角田町８番４７号阪急グランドビル２６階
+### 23. 	キャスタック株式会社  大阪府大阪市天王寺区生玉前町１番２６号情報センタービル３０１
+### 24. 	株式会社シリコンバレーテック  大阪府東大阪市小阪３丁目５番８－１００１号
+### 25. 	株式会社エコテック  大阪府大阪市中央区南船場２丁目６番１０号ツチノビル８階
+### 26. 	サマーバケーション株式会社  大阪府大阪市北区大深町４番２０号グランフロント大阪タワーＡ
+### 27. 	株式会社Ｈａｎａプラス  大阪府大阪市中央区南久宝寺町２丁目６番５号
+### 28. 	株式会社ＪＵＮＹＡ　ＷＡＲＡＳＨＩＮＡ  大阪府大阪市西区西本町１丁目１３番９号
+### 29. 	ゴイク電池株式会社  大阪府大阪市淀川区西中島５丁目１３番１２号
+### 30. 	株式会社ＢＦＩ  大阪府東大阪市御厨西ノ町２丁目１－３
+### 31. 	サスティナブルジャパン株式会社  大阪府大阪市東住吉区中野３丁目６番２２号
+### 32. 	株式会社スクーンジャパン  大阪府大阪市淀川区西中島１丁目９番１９号５０１号室
+### 33. 	ＮＳプロダクト株式会社  大阪府大阪市中央区本町４丁目５番１６号
+### 34. 	ちきゅうにやさしい株式会社  大阪府大阪市浪速区日本橋西１丁目３番１９号
+### 35. 	東来通商株式会社  大阪府大阪市住之江区南加賀屋３丁目８－２６Ｙ．Ｓ．ビル６Ｆ－Ａ
+### 36. 	フリースペースコミュニケーション株式会社  大阪府大阪市北区梅田２丁目２番２号ヒルトンプラザウエストタワー１８階
+### 37. 	株式会社エネルギーアセットマネジメント  大阪府枚方市菊丘９－１６
+### 38. 	日本カタン株式会社  大阪府枚方市磯島南町１３番１号
+### 39. 	ＫＯＢジャパン株式会社  大阪府大阪市西区江戸堀２丁目１番１号
+### 40. 	グローバルエッジ株式会社  大阪府枚方市楠葉美咲３丁目１８番１号
+### 41. 	株式会社Ｃｅｎｔｒａｌｉｔｙ　Ｊａｐａｎ  大阪府堺市北区大豆塚町２丁２０－１０
+### 42. 	株式会社いらっしゃいませ  大阪府大阪市浪速区難波中３丁目９－１
+### 43. 	株式会社エス・エス・アール  大阪府大阪市淀川区西中島７丁目１４番３５号日宝北５号館８０３
+### 44. 	株式会社ウエット・アンド・カンパニー  大阪府大阪市北区西天満３丁目４番５号西天満ワークビル５０１号
+### 45. 	株式会社ビーツ  大阪府大阪市中央区北浜２丁目２番２２号
+### 46. 	Ｐｉｎｎｙ株式会社  大阪府堺市西区上野芝向ヶ丘町２丁１２－３７Ｆｕｅｎｔｅ上野芝１０４号室
+### 47. 	楠原株式会社  大阪府大阪市浪速区大国３丁目７番７号ナオシス大国町５０３号
+### 48. 	株式会社１Ｋ  大阪府大阪市西区靱本町２丁目５番１８号都住創うつぼ２０１
+### 49. 	ＪＡＢ　Ｉｎｔｅｒｎａｔｉｏｎａｌ株式会社  大阪府大阪市東成区中本２丁目１１番９号
+### 50. 	日本光株式会社  大阪府大阪市中央区南本町４丁目３番１６－１２０８号
+### 51. 	株式会社ヒューマンテラス  大阪府大阪市北区西天満５丁目２－１８三共ビル東館７Ｆ
+### 52. 	株式会社ＢＣＪ‐４７  大阪府大阪市淀川区宮原４丁目５番３６号
+### 53. 	株式会社Ｔ．Ｎ．Ｋ  大阪府堺市中区平井９８０
+### 54. 	株式会社キリン堂ホールディングス  大阪府大阪市淀川区宮原４丁目５番３６号
+### 55. 	ＥＴＥＲＮＡＬ　ＧＲＡＣＥ製薬株式会社  大阪府大阪市浪速区大国１丁目９番１３号
+### 56. 	株式会社Ｊ‐ＦＵＮ５  大阪府高槻市川西町１丁目２６番５号
+### 57. 	７ＬＩＮＸ株式会社  大阪府泉佐野市鶴原４７９番地の１８
+### 58. 	ＫＡＩＫＡＴＳＵ株式会社  大阪府大阪市平野区加美北４丁目７－３４
+### 59. 	八十島プロシード株式会社  大阪府大阪市城東区鴫野西５丁目１９番２６号
+### 60. 	株式会社ＴＵＳＫ  大阪府大阪市中央区島之内１丁目７－１７Ｌ－ＬＯＦＴ長堀５０２号
+### 61. 	株式会社ワカマツ  大阪府堺市北区金岡町１４１４番地２
+### 62. 	株式会社バサラダイニング  大阪府大阪市淀川区西中島７丁目４番２１号ホーククレセント第２ビル３階
+### 63. 	ハイテック株式会社  大阪府大阪市北区梅田２丁目２番２号ヒルトンプラザウエストオフィスタワー１９Ｆ
+### 64. 	Ｌａｄｏｎ株式会社  大阪府大阪市中央区本町４丁目４番１０号イエント本町ビル７階
+### 65. 	オテンバ・ホールディングス株式会社  大阪府大阪市北区角田町８番１号
+### 66. 	株式会社Ｉ’ｎＴホールディングス  大阪府高槻市成合南の町５番３号
+### 67. 	ＩＮＴＡＩ　Ｊａｐａｎ株式会社  大阪府大阪市中央区城見２丁目１番６１号ツイン２１ＭＩＤタワー２３階
+### 68. 	ＴＴホールディングス株式会社  大阪府大阪市北区大深町３番４０－３６０４号
+### 69. 	天満橋合同会社  大阪府大阪市淀川区西中島４丁目５番４－２０３号
+### 70. 	永勝商事合同会社  大阪府大阪市浪速区日本橋東１丁目１２－１３グランビルヒラノ４階
+### 71. 	合同会社ルーフ  大阪府大阪市西区新町１丁目５番７号
+### 72. 	合同会社リニューアブルシステム１５号  大阪府大阪市淀川区西中島６丁目３番３２－８１１号
+### 73. 	合同会社スオーロ  大阪府豊中市新千里南町３丁目７番
+### 74. 	合同会社ＡＸＩＡパートナーズ  大阪府大阪市北区梅田１丁目１２番１２号東京建物梅田ビル１２階
+### 75. 	Ｒｅｄ　Ｌｉｆｅ　Ｃｏｎｓｕｌｔｉｎｇ合同会社  大阪府大阪市北区梅田１丁目２番２号大阪駅前第２ビル１２－１２
+### 76. 	医療法人社団新流会  大阪府大阪市北区大淀中１丁目６番１３号ＧＵＩＬＤＬａｂ３階
+### 77. 	一般社団法人心理セラピー・カウンセリング協会  大阪府枚方市香里ケ丘２丁目４番１号
+### 78. 	一般社団法人紅麹色素協会  大阪府大阪市淀川区西中島４丁目２番１２号
+### 79. 	一般財団法人日本結婚相談支援機構  大阪府大阪市中央区西心斎橋２丁目２番７号
+### 80. 	一般社団法人補助金申請適正機構  大阪府吹田市広芝町７番２６号３０５
+### 81. 	株式会社エビデンス・メディア研究所  大阪府大阪市中央区南本町３丁目３番２５号２１０３
+### 82. 	株式会社ペットペット  大阪府大阪市淀川区宮原１丁目２番４号
+### 83. 	ジャパンエステートデベロップメント株式会社  大阪府大阪市中央区今橋２丁目５番８号トレードピア淀屋橋１６階
+### 84. 	ＷＩＬＬＥＲ株式会社  大阪府大阪市北区大淀中１丁目１番８８号
+### 85. 	ＡＧＡＲＩ株式会社  大阪府枚方市岡本町７番１号
+### 86. 	株式会社地域みらいコンサルティング  大阪府大阪市中央区北浜３丁目５番２２号オリックス淀屋橋ビル７階
+### 87. 	ＮＳＩビジネスサポート株式会社  大阪府大阪市北区東天満１丁目３番１５号
+### 88. 	株式会社ライフインターフェイス  大阪府大阪市旭区高殿２丁目８番３８号
+### 89. 	株式会社アールイーマネジメント  大阪府大阪市西区江戸堀１丁目８番１７号
+### 90. 	サウスコ・ジャパン株式会社  大阪府大阪市此花区島屋６丁目２番８２号
+### 91. 	株式会社ブリッジプラス  大阪府大阪市西区西本町１丁目８番２号三晃ビル
+### 92. 	株式会社マハロ  大阪府大阪市東淀川区西淡路１丁目１番３５
+### 93. 	株式会社プレミアムＬＡＢ．  大阪府大阪市福島区福島３丁目１番６１号リバーサイドタワー中之島２７０１号室
+### 94. 	株式会社マーケッターズ  大阪府大阪市中央区高麗橋２丁目３－５
+### 95. 	株式会社アセットアライアンス  大阪府南河内郡河南町大字下河内１０９番地
+### 96. 	株式会社イメージ・ラボ  大阪府大阪市北区堂山町１番５号
+### 97. 	株式会社アルタイル  大阪府大阪市天王寺区六万体町５番２７号
+### 98. 	株式会社ＳＰＵ  大阪府大阪市西区京町堀１丁目３－３－２階
+### 99. 	株式会社エムジェイラボ  大阪府大阪市中央区玉造１丁目２番４０号
+### 100. 	株式会社日本ビジネスソリューション  大阪府大阪市中央区今橋４丁目１番１号淀屋橋三井ビルディング
+
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: LICENSE.md
+- 内容:
+MIT License
+
+Copyright (c) 2025 Taro.AI
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: README.md
+- 内容:
+# AI-Powered Prompt Optimization Framework
+
+## 概要
+
+このプロジェクトは、AI（Google Gemini）を利用した情報検索タスクの性能を、**"審判役のAI"（LLM as a Judge）に評価・改善させる**ための、全自動A/Bテストフレームワークです。
+
+良いプロンプト開発にありがちな「属人化」「時間コスト」「評価基準の曖昧さ」といった課題を、**「実行→評価→改善→再実行→比較」**というサイクルを自動化することで解決します。
+
+### イメージ
+パワポ
+https://1drv.ms/p/c/135b66d476409d97/EZsra7MFu3FAolo4vOuwvMkB7rZSty9P--oLLV-mjV10wg?e=uKYQAu
+
+### 主要な構成要素
+
+1.  **評価・改善司令塔 (`advanced_evaluation_runner_log.py`)**
+    *   プロジェクトのメインスクリプト。
+    *   全体のプロセスを管理し、AI検索エージェントの性能を評価・改善します。
+
+2.  **AI検索エージェント (`gemini_search_app_new_sdk.py`)**
+    *   司令塔からの指示（プロンプト）に従って、実際に企業情報検索を実行するサブスクリプト。
+    *   Google検索ツールと連携し、リアルタイムの情報を取得します。
+
+3.  **APIキーマネージャー (`api_key_manager.py`)**
+    *   複数のGoogle APIキーを安全にローテーションさせ、レートリミットを回避するためのシングルトンクラス。
+
+```mermaid
+graph LR
+    subgraph "評価・改善司令塔"
+        direction TD
+        A1["<b>役割</b><br>“審判役AI”による<br>全自動A/Bテストツール"]
+        A2["<b>評価フロー</b><br>1. 初回実行<br>2. 評価 & 改善案生成<br>3. 改善版で再実行<br>4. 再評価<br>5. 最終比較レポート"]
+        A1 --> A2
+    end
+
+    subgraph "AI検索エージェント"
+        direction TD
+        B1["<b>役割</b><br>Google検索と連携する<br>情報検索の実行部隊"]
+        B2["<b>特徴</b><br>・思考プロセスの可視化<br>・動的プロンプト対応<br>・ストリーム出力"]
+        B1 --> B2
+    end
+    
+    A2 -- "実行指示 (プロンプト)" --> B1
+    B2 -- "実行結果 (ログ)" --> A2
+
+    style A1 fill:#E8F5E9,stroke:#333
+    style A2 fill:#F1F8E9,stroke:#333
+    style B1 fill:#E3F2FD,stroke:#333
+    style B2 fill:#EBF5FB,stroke:#333
+```
+
+## 特徴
+
+*   **LLM as a Judge**: 人間の代わりにAIがAIの出力を評価することで、客観的で一貫性のある評価を実現。
+*   **プロンプトの自己改善**: AIが自身の実行結果を分析し、より良い指示（プロンプト）を自動生成。
+*   **定量的・定性的評価**: 「スコア」や「実行時間」といった数値と、「分析コメント」や「改善提案」という言葉の両面から多角的に評価。
+*   **思考プロセスの可視化**: AIが何を考え、何を検索したかをリアルタイムで表示し、判断の透明性を確保。
+*   **安全なAPIキー管理**: 複数のAPIキーを自動でローテーションし、APIのレートリミットを回避。
+*   **徹底したログ管理**: 全ての実行プロセスとAIの出力を、企業名とタイムスタンプ付きのログファイルに保存。
+
+## セットアップ
+
+### 1. リポジトリのクローン
+
+```bash
+git clone https://github.com/your-username/your-repository.name.git
+cd your-repository.name
+```
+
+### 2. 必要なライブラリのインストール
+
+`requirements.txt`を使用して、必要なPythonライブラリをインストールします。
+
+```bash
+pip install -r requirements.txt
+```
+
+### 3. 環境変数の設定
+
+プロジェクトのルートディレクトリに`.env`ファイルを作成し、お持ちのGoogle APIキーを設定します。キーは複数設定することができ、プログラムが自動でローテーションして使用します。
+Google APIキーの取得は、こちらにアクセスしてください。（無料で取得できます。）
+https://aistudio.google.com/apikey
+
+**`.env` ファイルの例:**
+
+```env
+# 基本となるキー
+GOOGLE_API_KEY="AIzaSy...your...first...key"
+
+# 2つ目以降のキー (連番で設定)
+GOOGLE_API_KEY_1="AIzaSy...your...second...key"
+GOOGLE_API_KEY_2="AIzaSy...your...third...key"
+# ... 必要なだけ追加
+```
+
+`api_key_manager.py`がこれらのキーを全て読み込み、管理します。
+
+## 使い方
+
+### 基本的な使い方（1社ずつのテスト）
+
+メインスクリプトである`advanced_evaluation_runner_log.py`を実行します。引数として、調査したい企業名を渡してください。
+
+```bash
+python advanced_evaluation_runner_log.py "調査したい企業名　住所"
+```
+
+**実行例:**
+```bash
+python advanced_evaluation_runner_log.py "グーグル合同会社　住所"
+```
+
+### ファイルにテスト用データがあります。
+
+プロジェクトには、テスト用の企業データが100件記述された`input_data_sample.txt`が用意されています。このファイルを使って、テストを実行できます。
+
+**`input_data_sample.txt` の形式:**
+企業情報は`###`または改行で区切られています。
+```text
+### 1. 	ダイレックス・ジャパン株式会社  大阪府大阪市西区新町１丁目２４番８号ノース四ツ橋ビル８Ｆ
+### 2. 	原町製袋株式会社  大阪府大阪市中央区久太郎町４丁目１番３号
+### 3. 	新日本サーマルセラミックス株式会社  大阪府堺市堺区戎島町４丁４５番地１ポルタスセンタービル１２階
+...
+```
+
+
+## 実行プロセス
+
+スクリプトを実行すると、以下のステップが自動で進行します。
+
+1.  **初回実行**: デフォルトのプロンプトで`gemini_search_app_new_sdk.py`が実行されます。
+2.  **初回評価**: 実行ログが分析され、評価レポートと「改善版プロンプト」が生成されます。
+3.  **再実行**: 生成された「改善版プロンプト」を使って、再度`gemini_search_app_new_sdk.py`が実行されます。
+4.  **2回目評価**: 再実行のログが分析され、評価レポートが作成されます。
+5.  **最終比較**: 2つの評価レポートが比較され、総合的な分析結果がコンソールに出力されます。
+
+## ログの確認
+
+実行ログは、プロジェクトルートに作成される`log/`ディレクトリ内に保存されます。
+
+*   ファイル名: `[企業名]_[実行開始日時].log`
+*   内容: コンソールに出力された内容（AIの思考プロセス、最終回答、評価レポートなど）が全て記録されています。
+
+## ライセンス
+
+このプロジェクトは[MITライセンス](LICENSE.md)の下で公開されています。
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: requirements.txt
+- 内容:
+# Google Gemini APIの新しいSDK
+google-genai
+
+# .envファイルから環境変数を読み込むために使用
+python-dotenv
+
+
+
+---
+
+
+- フォルダ名: .
+- ファイル名: results.json
+- 内容:
+[
+  {
+    "companyName": "ダイレックス・ジャパン株式会社",
+    "address": "大阪府大阪市西区新町１丁目２４番８号ノース四ツ橋ビル８Ｆ",
+    "industry": "医療機器の輸入・卸売、医療機器商社"
+  },
+  {
+    "companyName": "原町製袋株式会社",
+    "address": "大阪府大阪市中央区久太郎町４丁目１番３号",
+    "industry": "不明"
+  },
+  {
+    "companyName": "新日本サーマルセラミックス株式会社",
+    "address": "大阪府堺市堺区戎島町４丁４５番地１ポルタスセンタービル１２階",
+    "industry": "高耐熱・耐火無機繊維、耐火断熱材料の製造・販売"
+  },
+  {
+    "companyName": "株式会社エコクリエイト大阪",
+    "address": "大阪府大阪市此花区北港白津２丁目４番１３号",
+    "industry": "産業廃棄物処理施設の運営・維持管理、産業廃棄物処分"
+  },
+  {
+    "companyName": "株式会社Ｗａｃｈｙ",
+    "address": "大阪府大阪市福島区福島１丁目１番４８－２５０３号",
+    "industry": "システム開発、IT"
+  },
+  {
+    "companyName": "株式会社ＧＩＰ",
+    "address": "大阪府大阪市中央区南船場２丁目５番１９号３階",
+    "industry": "経営コンサルティング、広告クリエイティブ事業、医療器具販売事業"
+  },
+  {
+    "companyName": "株式会社グランドプロモーション",
+    "address": "大阪府大阪市中央区南本町３丁目２番９号",
+    "industry": "不明"
+  },
+  {
+    "companyName": "株式会社太閤印刷",
+    "address": "大阪府大阪市城東区中央２丁目１４番Ｃ－１１０８号",
+    "industry": "印刷"
+  },
+  {
+    "companyName": "株式会社ドリームダイニング",
+    "address": "大阪府大阪市天王寺区味原町１３番９号",
+    "industry": "飲食店の経営"
+  },
+  {
+    "companyName": "株式会社クレッセント",
+    "address": "大阪府堺市南区宮山台３丁１１番５号",
+    "industry": "ECコンサルティング事業、ECマーケティング事業、ECサイト構築・運用、ECシステム開発・運用、画像処理ソフト・ハードウェアの輸入・販売、画像処理プログラムや機器の開発、デジタルスタジオの貸し出し、映像制作"
+  },
+  {
+    "companyName": "株式会社ＳＮＯＰＥＳ",
+    "address": "大阪府高石市千代田２丁目１５番５号",
+    "industry": "卸売業、貿易業（日用品雑貨、食糧品、資源、化粧品等の輸出入）"
+  },
+  {
+    "companyName": "ＭＩＴＡＳＵ株式会社",
+    "address": "大阪府大阪市西区江戸堀２丁目１番１号江戸堀センタービル９階",
+    "industry": "不明"
+  },
+  {
+    "companyName": "エーピーアイコンサルタンツ株式会社",
+    "address": "大阪府大阪市淀川区宮原１丁目１３番５号",
+    "industry": "不明"
+  },
+  {
+    "companyName": "リゾート・コミュニケーション株式会社",
+    "address": "大阪府大阪市此花区北港緑地２丁目２番９８号",
+    "industry": "広告代理業、リゾート施設コンサルティング、イベント企画・運営"
+  },
+  {
+    "companyName": "インテグラル株式会社",
+    "address": "大阪府大阪市中央区高津１丁目３－８－１１０７",
+    "industry": "不明"
+  },
+  {
+    "companyName": "ＡＯＩ　ＣＲＥＡＴＩＶＥ　ＭＡＮＡＧＥＭＥＮＴ株式会社",
+    "address": "大阪府大阪市此花区西九条１丁目３番３７号",
+    "industry": "不明"
+  },
+  {
+    "companyName": "ＳＩＫＩ株式会社",
+    "address": "大阪府大阪市浪速区稲荷１丁目７番２号３Ｆ",
+    "industry": "インターネット通信販売業、日用品・化粧品企画販売、サブスクリプションサービス、教育関連事業"
+  },
+  {
+    "companyName": "株式会社コミス",
+    "address": "大阪府大阪市平野区加美北１丁目１６－１４－２階",
+    "industry": "外国人材支援、登録支援機関"
+  },
+  {
+    "companyName": "株式会社アイテック",
+    "address": "大阪府吹田市南吹田５丁目２６番２８号",
+    "industry": "技術的請負総合マネジメント"
+  },
+  {
+    "companyName": "株式会社ＳＫホールディングス",
+    "address": "大阪府和泉市和気町２丁目３番１号",
+    "industry": "純粋持株会社（環境ビジネス、製鋼原料加工販売、不動産賃貸、会計・税務など多岐にわたるグループ事業を統括）"
+  },
+  {
+    "companyName": "株式会社ドレスアンドコー",
+    "address": "大阪府大阪市浪速区湊町１丁目２番３号マルイト難波ビル１１階",
+    "industry": "不明"
+  },
+  {
+    "companyName": "ハックベンチャーズ株式会社",
+    "address": "大阪府大阪市北区角田町８番４７号阪急グランドビル２６階",
+    "industry": "ベンチャーキャピタル事業"
+  },
+  {
+    "companyName": "キャスタック株式会社",
+    "address": "大阪府大阪市天王寺区生玉前町１番２６号情報センタービル３０１",
+    "industry": "不明"
+  },
+  {
+    "companyName": "株式会社シリコンバレーテック",
+    "address": "大阪府東大阪市小阪３丁目５番８－１００１号",
+    "industry": "スタートアップ投資・事業支援"
+  },
+  {
+    "companyName": "株式会社エコテック",
+    "address": "大阪府大阪市中央区南船場２丁目６番１０号ツチノビル８階",
+    "industry": "電気設備・冷暖房設備・空調設備工事、フロアコーティング"
+  },
+  {
+    "companyName": "サマーバケーション株式会社",
+    "address": "大阪府大阪市北区大深町４番２０号グランフロント大阪タワーＡ",
+    "industry": "スマートフォン向けゲームアプリ開発・運営"
+  },
+  {
+    "companyName": "株式会社Ｈａｎａプラス",
+    "address": "大阪府大阪市中央区南久宝寺町２丁目６番５号",
+    "industry": "不明"
+  },
+  {
+    "companyName": "株式会社ＪＵＮＹＡ　ＷＡＲＡＳＨＩＮＡ",
+    "address": "大阪府大阪市西区西本町１丁目１３番９号",
+    "industry": "不明"
+  },
+  {
+    "companyName": "ゴイク電池株式会社",
+    "address": "大阪府大阪市淀川区西中島５丁目１３番１２号",
+    "industry": "電池診断装置・バッテリーマネージメントシステム開発・販売"
+  },
+  {
+    "companyName": "株式会社ＢＦＩ",
+    "address": "大阪府東大阪市御厨西ノ町２丁目１－３",
+    "industry": "食品販売・美容健康事業"
+  },
+  {
+    "companyName": "サスティナブルジャパン株式会社",
+    "address": "大阪府大阪市東住吉区中野３丁目６番２２号",
+    "industry": "廃棄物処理、リサイクル業"
+  },
+  {
+    "companyName": "株式会社スクーンジャパン",
+    "address": "大阪府大阪市淀川区西中島１丁目９番１９号５０１号室",
+    "industry": "生理用品の販売（月経カップ、布ナプキン）"
+  },
+  {
+    "companyName": "ＮＳプロダクト株式会社",
+    "address": "大阪府大阪市中央区本町４丁目５番１６号",
+    "industry": "建築・土木資材の製造・販売・レンタル"
+  },
+  {
+    "companyName": "ちきゅうにやさしい株式会社",
+    "address": "大阪府大阪市浪速区日本橋西１丁目３番１９号",
+    "industry": "リフォーム工事業（省エネ・環境配慮型リフォーム）"
+  },
+  {
+    "companyName": "東来通商株式会社",
+    "address": "大阪府大阪市住之江区南加賀屋３丁目８－２６Ｙ．Ｓ．ビル６Ｆ－Ａ",
+    "industry": "不明"
+  },
+  {
+    "companyName": "フリースペースコミュニケーション株式会社",
+    "address": "大阪府大阪市北区梅田２丁目２番２号ヒルトンプラザウエストタワー１８階",
+    "industry": "不明"
+  },
+  {
+    "companyName": "株式会社エネルギーアセットマネジメント",
+    "address": "大阪府枚方市菊丘９－１６",
+    "industry": "不明"
+  },
+  {
+    "companyName": "日本カタン株式会社",
+    "address": "大阪府枚方市磯島南町１３番１号",
+    "industry": "電気機械器具製造業（架線金具製造）"
+  },
+  {
+    "companyName": "ＫＯＢジャパン株式会社",
+    "address": "大阪府大阪市西区江戸堀２丁目１番１号",
+    "industry": "不明"
+  },
+  {
+    "companyName": "グローバルエッジ株式会社",
+    "address": "大阪府枚方市楠葉美咲３丁目１８番１号",
+    "industry": "不明"
+  },
+  {
+    "companyName": "株式会社Ｃｅｎｔｒａｌｉｔｙ　Ｊａｐａｎ",
+    "address": "大阪府堺市北区大豆塚町２丁２０－１０",
+    "industry": "ソフトウェア開発業"
+  },
+  {
+    "companyName": "株式会社いらっしゃいませ",
+    "address": "大阪府大阪市浪速区難波中３丁目９－１",
+    "industry": "システム開発業"
+  },
+  {
+    "companyName": "株式会社エス・エス・アール",
+    "address": "大阪府大阪市淀川区西中島７丁目１４番３５号日宝北５号館８０３",
+    "industry": "ソフトウェア開発業"
+  },
+  {
+    "companyName": "株式会社ウエット・アンド・カンパニー",
+    "address": "大阪府大阪市北区西天満３丁目４番５号西天満ワークビル５０１号",
+    "industry": "介護事業・コンサルティング業"
+  },
+  {
+    "companyName": "株式会社ビーツ",
+    "address": "大阪府大阪市中央区北浜２丁目２番２２号",
+    "industry": "広告・マーケティング業"
+  },
+  {
+    "companyName": "Ｐｉｎｎｙ株式会社",
+    "address": "大阪府堺市西区上野芝向ヶ丘町２丁１２－３７Ｆｕｅｎｔｅ上野芝１０４号室",
+    "industry": "不明"
+  },
+  {
+    "companyName": "楠原株式会社",
+    "address": "大阪府大阪市浪速区大国３丁目７番７号ナオシス大国町５０３号",
+    "industry": "不明"
+  },
+  {
+    "companyName": "株式会社１Ｋ",
+    "address": "大阪府大阪市西区靱本町２丁目５番１８号都住創うつぼ２０１",
+    "industry": "メディア運営、ウェブサービス開発"
+  },
+  {
+    "companyName": "ＪＡＢ　Ｉｎｔｅｒｎａｔｉｏｎａｌ株式会社",
+    "address": "大阪府大阪市東成区中本２丁目１１番９号",
+    "industry": "不明"
+  },
+  {
+    "companyName": "日本光株式会社",
+    "address": "大阪府大阪市中央区南本町４丁目３番１６－１２０８号",
+    "industry": "電気通信事業"
+  },
+  {
+    "companyName": "株式会社ヒューマンテラス",
+    "address": "大阪府大阪市北区西天満５丁目２－１８三共ビル東館７Ｆ",
+    "industry": "社会保険労務士業"
+  },
+  {
+    "companyName": "株式会社ＢＣＪ‐４７",
+    "address": "大阪府大阪市淀川区宮原４丁目５番３６号",
+    "industry": "投資事業"
+  },
+  {
+    "companyName": "株式会社Ｔ．Ｎ．Ｋ",
+    "address": "大阪府堺市中区平井９８０",
+    "industry": "不明"
+  },
+  {
+    "companyName": "株式会社キリン堂ホールディングス",
+    "address": "大阪府大阪市淀川区宮原４丁目５番３６号",
+    "industry": "小売業"
+  },
+  {
+    "companyName": "ＥＴＥＲＮＡＬ　ＧＲＡＣＥ製薬株式会社",
+    "address": "大阪府大阪市浪速区大国１丁目９番１３号",
+    "industry": "医薬品・化粧品等の製造販売及び輸出入"
+  },
+  {
+    "companyName": "株式会社Ｊ‐ＦＵＮ５",
+    "address": "大阪府高槻市川西町１丁目２６番５号",
+    "industry": "不明"
+  },
+  {
+    "companyName": "７ＬＩＮＸ株式会社",
+    "address": "大阪府泉佐野市鶴原４７９番地の１８",
+    "industry": "電気工事業、電力販売業"
+  },
+  {
+    "companyName": "ＫＡＩＫＡＴＳＵ株式会社",
+    "address": "大阪府大阪市平野区加美北４丁目７－３４",
+    "industry": "不明"
+  },
+  {
+    "companyName": "八十島プロシード株式会社",
+    "address": "大阪府大阪市城東区鴫野西５丁目１９番２６号",
+    "industry": "樹脂部品製造・加工、素材販売"
+  },
+  {
+    "companyName": "株式会社ＴＵＳＫ",
+    "address": "大阪府大阪市中央区島之内１丁目７－１７Ｌ－ＬＯＦＴ長堀５０２号",
+    "industry": "不明"
+  },
+  {
+    "companyName": "株式会社ワカマツ",
+    "address": "大阪府堺市北区金岡町１４１４番地２",
+    "industry": "理容業、美容業"
+  },
+  {
+    "companyName": "株式会社バサラダイニング",
+    "address": "大阪府大阪市淀川区西中島７丁目４番２１号ホーククレセント第２ビル３階",
+    "industry": "飲食店経営、飲食店プロデュース"
+  },
+  {
+    "companyName": "ハイテック株式会社",
+    "address": "大阪府大阪市北区梅田２丁目２番２号ヒルトンプラザウエストオフィスタワー１９Ｆ",
+    "industry": "食品加工機械の開発・製造・販売"
+  },
+  {
+    "companyName": "Ｌａｄｏｎ株式会社",
+    "address": "大阪府大阪市中央区本町４丁目４番１０号イエント本町ビル７階",
+    "industry": "不明"
+  },
+  {
+    "companyName": "オテンバ・ホールディングス株式会社",
+    "address": "大阪府大阪市北区角田町８番１号",
+    "industry": "不明"
+  },
+  {
+    "companyName": "株式会社Ｉ’ｎＴホールディングス",
+    "address": "大阪府高槻市成合南の町５番３号",
+    "industry": "不明"
+  },
+  {
+    "companyName": "ＩＮＴＡＩ Japan株式会社",
+    "address": "大阪府大阪市中央区城見２丁目１番６１号ツイン２１ＭＩＤタワー２３階",
+    "industry": "不明"
+  },
+  {
+    "companyName": "ＴＴホールディングス株式会社",
+    "address": "大阪府大阪市北区大深町３番４０－３６０４号",
+    "industry": "不明"
+  },
+  {
+    "companyName": "天満橋合同会社",
+    "address": "大阪府大阪市淀川区西中島４丁目５番４－２０３号",
+    "industry": "不明"
+  },
+  {
+    "companyName": "永勝商事合同会社",
+    "address": "大阪府大阪市浪速区日本橋東１丁目１２－１３グランビルヒラノ４階",
+    "industry": "不明"
+  },
+  {
+    "companyName": "合同会社ルーフ",
+    "address": "大阪府大阪市西区新町１丁目５番７号",
+    "industry": "不明"
+  },
+  {
+    "companyName": "合同会社リニューアブルシステム１５号",
+    "address": "大阪府大阪市淀川区西中島６丁目３番３２－８１１号",
+    "industry": "不明"
+  },
+  {
+    "companyName": "合同会社スオーロ",
+    "address": "大阪府豊中市新千里南町３丁目７番",
+    "industry": "不明"
+  },
+  {
+    "companyName": "合同会社ＡＸＩＡパートナーズ",
+    "address": "大阪府大阪市北区梅田１丁目１２番１２号東京建物梅田ビル１２階",
+    "industry": "不動産管理業"
+  },
+  {
+    "companyName": "Ｒｅｄ　Ｌｉｆｅ　Ｃｏｎｓｕｌｔｉｎｇ合同会社",
+    "address": "大阪府大阪市北区梅田１丁目２番２号大阪駅前第２ビル１２－１２",
+    "industry": "不明"
+  },
+  {
+    "companyName": "医療法人社団新流会",
+    "address": "大阪府大阪市北区大淀中１丁目６番１３号ＧＵＩＬＤＬａｂ３階",
+    "industry": "医療業"
+  },
+  {
+    "companyName": "一般社団法人心理セラピー・カウンセリング協会",
+    "address": "大阪府枚方市香里ケ丘２丁目４番１号",
+    "industry": "心理カウンセリング業"
+  },
+  {
+    "companyName": "一般社団法人紅麹色素協会",
+    "address": "大阪府大阪市淀川区西中島４丁目２番１２号",
+    "industry": "食品添加物関連団体"
+  },
+  {
+    "companyName": "一般財団法人日本結婚相談支援機構",
+    "address": "大阪府大阪市中央区西心斎橋２丁目２番７号",
+    "industry": "結婚相談支援業"
+  },
+  {
+    "companyName": "一般社団法人補助金申請適正機構",
+    "address": "大阪府吹田市広芝町７番２６号３０５",
+    "industry": "補助金申請支援業"
+  },
+  {
+    "companyName": "株式会社エビデンス・メディア研究所",
+    "address": "大阪府大阪市中央区南本町３丁目３番２５号２１０３",
+    "industry": "不明"
+  },
+  {
+    "companyName": "株式会社ペットペット",
+    "address": "大阪府大阪市淀川区宮原１丁目２番４号",
+    "industry": "ペット関連Webサービス運営、ペット用品販売"
+  },
+  {
+    "companyName": "ジャパンエステートデベロップメント株式会社",
+    "address": "大阪府大阪市中央区今橋２丁目５番８号トレードピア淀屋橋１６階",
+    "industry": "不動産業"
+  },
+  {
+    "companyName": "ＷＩＬＬＥＲ株式会社",
+    "address": "大阪府大阪市北区大淀中１丁目１番８８号",
+    "industry": "旅行業、陸運業、交通インフラ事業"
+  },
+  {
+    "companyName": "ＡＧＡＲＩ株式会社",
+    "address": "大阪府枚方市岡本町７番１号",
+    "industry": "農業、養豚業、青果物栽培・販売"
+  },
+  {
+    "companyName": "株式会社地域みらいコンサルティング",
+    "address": "大阪府大阪市中央区北浜３丁目５番２２号オリックス淀屋橋ビル７階",
+    "industry": "総合コンサルティング、保険代理業"
+  },
+  {
+    "companyName": "ＮＳＩビジネスサポート株式会社",
+    "address": "大阪府大阪市北区東天満１丁目３番１５号",
+    "industry": "旅行業"
+  },
+  {
+    "companyName": "株式会社ライフインターフェイス",
+    "address": "大阪府大阪市旭区高殿２丁目８番３８号",
+    "industry": "不明"
+  },
+  {
+    "companyName": "株式会社アールイーマネジメント",
+    "address": "大阪府大阪市西区江戸堀１丁目８番１７号",
+    "industry": "不動産業、建築設計、建設コンサルティング"
+  },
+  {
+    "companyName": "サウスコ・ジャパン株式会社",
+    "address": "大阪府大阪市此花区島屋６丁目２番８２号",
+    "industry": "機械要素部品製造・販売、産業用部品卸売"
+  },
+  {
+    "companyName": "株式会社ブリッジプラス",
+    "address": "大阪府大阪市西区西本町１丁目８番２号三晃ビル",
+    "industry": "不明"
+  },
+  {
+    "companyName": "株式会社マハロ",
+    "address": "大阪府大阪市東淀川区西淡路１丁目１番３５",
+    "industry": "通販事業、ヘルスビューティー商材輸出、フィルター・水素含有水販売"
+  },
+  {
+    "companyName": "株式会社プレミアムＬＡＢ．",
+    "address": "大阪府大阪市福島区福島３丁目１番６１号リバーサイドタワー中之島２７０１号室",
+    "industry": "ソフトウェア開発、FinTech関連事業"
+  },
+  {
+    "companyName": "株式会社マーケッターズ",
+    "address": "大阪府大阪市中央区高麗橋２丁目３－５",
+    "industry": "不動産売買仲介、不動産コンサルティング"
+  },
+  {
+    "companyName": "株式会社アセットアライアンス",
+    "address": "大阪府南河内郡河南町大字下河内１０９番地",
+    "industry": "不明"
+  },
+  {
+    "companyName": "株式会社イメージ・ラボ",
+    "address": "大阪府大阪市北区堂山町１番５号",
+    "industry": "介護業界向け就職支援、人材・職業訓練支援、企業研修"
+  },
+  {
+    "companyName": "株式会社アルタイル",
+    "address": "大阪府大阪市天王寺区六万体町５番２７号",
+    "industry": "不動産売買、不動産仲介、不動産管理、リフォーム"
+  },
+  {
+    "companyName": "株式会社ＳＰＵ",
+    "address": "大阪府大阪市西区京町堀１丁目３－３－２階",
+    "industry": "不明"
+  },
+  {
+    "companyName": "株式会社エムジェイラボ",
+    "address": "大阪府大阪市中央区玉造１丁目２番４０号",
+    "industry": "登記閉鎖済み（森下仁丹株式会社に吸収合併）"
+  },
+  {
+    "companyName": "株式会社日本ビジネスソリューション",
+    "address": "大阪府大阪市中央区今橋４丁目１番１号淀屋橋三井ビルディング",
+    "industry": "不明"
+  }
+]

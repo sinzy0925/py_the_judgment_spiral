@@ -28,6 +28,11 @@ HARDCODED_EXCLUDE_PATTERNS = [
     "kindle_shot2.py",# kindle_shot2.pyを除外
     "test1/",         # test1/フォルダを除外 
     "build/",
+    "__pycache__/",
+    ".venv/",
+    "bup/",
+    "log/",
+    ".env",
     "insta/*",
     "bin/",
     "bup/",         
