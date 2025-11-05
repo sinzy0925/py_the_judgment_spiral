@@ -8,7 +8,7 @@ import inspect  # --- ▼▼▼ 修正ポイント1: inspectモジュールを�
 load_dotenv()
 
 # セッションファイル（最後に使ったキーのインデックスを保存する場所）
-SESSION_FILE = os.path.join(os.getcwd(), '.session_data.json')
+SESSION_FILE = os.path.join(os.getcwd(), '.session_data1.json')
 
 class ApiKeyManager:
     """
@@ -26,6 +26,17 @@ class ApiKeyManager:
         if hasattr(self, '_initialized'):
             return
         self._initialized = True
+
+        # --- ▼▼▼ ここから追加 ▼▼▼ ---
+        # .env1ファイルが存在すれば、そこから環境変数を読み込む
+        # override=True により、もし他の場所に同名の環境変数があってもファイルの内容で上書きします。
+        #dotenv_path = os.path.join(os.getcwd(), '.env1')
+        #if os.path.exists(dotenv_path):
+        #    load_dotenv(dotenv_path=dotenv_path, override=True)
+        #    print(f"[{self.__class__.__name__}] '{os.path.basename(dotenv_path)}' から設定をロードしました。")
+        #else:
+        #    print(f"警告: '{os.path.basename(dotenv_path)}' ファイルが見つかりません。環境変数を直接読み込みます。")
+        # --- ▲▲▲ ここまで追加 ▲▲▲ ---
 
         self._api_keys: list[str] = []
         self._current_index: int = -1
@@ -45,7 +56,9 @@ class ApiKeyManager:
         i = 1
         while True:
             key = os.getenv(f'GOOGLE_API_KEY_{i}')
-            if key:
+            if i > 15:
+                break
+            elif key:
                 keys.add(key)
                 i += 1
             else:
@@ -103,7 +116,7 @@ class ApiKeyManager:
             selected_key = self._api_keys[self._current_index]
             
             # --- ▼▼▼ 修正ポイント3: ログに呼び出し元情報を追加 ▼▼▼ ---
-            print(f"[{self.__class__.__name__}] APIkey:idx:{self._current_index}, key:{selected_key[-4:]}[{caller_info}]")
+            print(f"[{self.__class__.__name__}] APIkey: {selected_key[-6:]} [{caller_info}]")
             
             return selected_key
 

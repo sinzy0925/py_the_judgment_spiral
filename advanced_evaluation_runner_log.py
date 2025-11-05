@@ -228,7 +228,7 @@ json```{{
 """
 
 async def run_search_app(company_name: str, prompt_file: str = None) -> str:
-    target_script = "gemini_search_app_new_sdk.py"
+    target_script = "gemini_search_paralell.py"
     command = [sys.executable, target_script, company_name]
     if prompt_file:
         command.extend(["--prompt-file", prompt_file])

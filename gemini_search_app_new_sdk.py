@@ -198,6 +198,16 @@ async def main():
 
 
 # 出力形式 (JSON)
+# 調査中断レポート
+```json
+{{
+  "status": "terminated",
+  "error": "Required information could not be found.",
+  "message": "主要調査項目のうち2項目以上が不明だったため、調査を中断しました。",
+  "targetCompany": "{company_name}"
+}}```
+
+
 ### 通常調査レポート
 ```json
 {{
@@ -356,6 +366,9 @@ async def main():
     await asyncio.sleep(2)
 
     if answer_text:
+        answer_text1 = answer_text.replace("```json", "").replace("```", "")
+        print(answer_text1)
+        print('\nanswer_text1')
         answer_key = await api_key_manager.get_next_key()
         if answer_key:
             key_info = api_key_manager.last_used_key_info 
@@ -369,13 +382,11 @@ async def main():
 
     print("\n------------------------------")
     end_time = time.time()
-    print(f"\n総実行時間: {end_time - start_time:.2f}秒")
-    print(f"[ログ] 入力トークン数: {input_tokens}")
-    print(f"[ログ] 思考トークン数: {thinking_tokens}")
-    print(f"[ログ] 回答トークン数: {answer_tokens}")
-    total_output_tokens = thinking_tokens + answer_tokens
-    print(f"[ログ] 合計出力トークン数: {total_output_tokens}")
-    print(f"[ログ] 総計トークン数: {input_tokens + total_output_tokens}")
+    print(f"time: {end_time - start_time:.2f}秒")
+    print(f"input_tokens: {input_tokens}")
+    print(f"thinking_tokens: {thinking_tokens}")
+    print(f"answer_tokens: {answer_tokens}")
+    print(f"all_tokens: {input_tokens + thinking_tokens + answer_tokens}")
 
 if __name__ == "__main__":
     exit_code = 0

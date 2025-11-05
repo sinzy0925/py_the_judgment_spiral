@@ -8,7 +8,7 @@ import inspect  # --- ▼▼▼ 修正ポイント1: inspectモジュールを�
 load_dotenv()
 
 # セッションファイル（最後に使ったキーのインデックスを保存する場所）
-SESSION_FILE = os.path.join(os.getcwd(), '.session_data.json')
+SESSION_FILE = os.path.join(os.getcwd(), '.session_data2.json')
 
 class ApiKeyManager:
     """
@@ -27,6 +27,7 @@ class ApiKeyManager:
             return
         self._initialized = True
 
+
         self._api_keys: list[str] = []
         self._current_index: int = -1
         self._key_selection_lock = asyncio.Lock()
@@ -42,10 +43,12 @@ class ApiKeyManager:
         if base_key:
             keys.add(base_key)
         
-        i = 1
+        i = 16
         while True:
             key = os.getenv(f'GOOGLE_API_KEY_{i}')
-            if key:
+            if i > 25:
+                break
+            elif key:
                 keys.add(key)
                 i += 1
             else:
@@ -103,7 +106,7 @@ class ApiKeyManager:
             selected_key = self._api_keys[self._current_index]
             
             # --- ▼▼▼ 修正ポイント3: ログに呼び出し元情報を追加 ▼▼▼ ---
-            print(f"[{self.__class__.__name__}] APIkey:idx:{self._current_index}, key:{selected_key[-4:]}[{caller_info}]")
+            print(f"[{self.__class__.__name__}] APIkey: {selected_key[-6:]} [{caller_info}]")
             
             return selected_key
 
